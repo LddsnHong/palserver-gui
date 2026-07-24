@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { FiChevronRight, FiHome, FiRefreshCw } from "react-icons/fi";
+import { FiAlertTriangle, FiChevronRight, FiHome, FiRefreshCw } from "react-icons/fi";
 import type { SaveGuild } from "@palserver/shared";
 import type { AgentClient } from "./api";
 import { GuildDetailModal, researchName } from "./GuildDetailModal";
 import { useGameData } from "./gameData";
 import { t, useI18n } from "./i18n";
-import { EmptyState, btnGhost, card, errorCls } from "./ui";
+import { EmptyState, btnGhost, card, errorCls, inputCls } from "./ui";
 
 /**
  * 公會分頁 — 存檔快照(save-tools 掃描)驅動的公會總覽。
@@ -33,6 +33,13 @@ export function GuildsTab({
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [detailFor, setDetailFor] = useState<SaveGuild | null>(null);
+  // 荒廢篩選:管理員輸入天數,標出「任一成員超過該天數未上線」的公會,引導安全刪除荒廢據點。
+  const [staleDays, setStaleDays] = useState<number | "">("");
+  const staleThreshold = staleDays === "" ? null : Math.max(1, staleDays);
+  const staleMembersOf = (g: SaveGuild) =>
+    staleThreshold === null
+      ? []
+      : g.members.filter((m) => m.lastOnlineDaysAgo != null && m.lastOnlineDaysAgo >= staleThreshold);
 
   const load = useCallback(async () => {
     try {
@@ -100,6 +107,23 @@ export function GuildsTab({
               ? "" // 無法取得快照時只顯示下方的提示框,不重複「尚未掃描」
               : t("尚未掃描過存檔。點「從存檔刷新」建立快照。")}
         </p>
+        {sorted.length > 0 && (
+          <label className="inline-flex items-center gap-1.5 text-xs text-ink-muted">
+            <FiAlertTriangle className="size-3.5 shrink-0 text-amber-500" />
+            {t("荒廢公會篩選:標出有成員超過")}
+            <input
+              type="number"
+              min={1}
+              value={staleDays}
+              onChange={(e) =>
+                setStaleDays(e.target.value === "" ? "" : Math.max(1, Number(e.target.value)))
+              }
+              placeholder="30"
+              className={`${inputCls} w-20 px-2 py-1`}
+            />
+            {t("日未上線")}
+          </label>
+        )}
         {canScan && (
           <button
             className={`${btnGhost} inline-flex items-center gap-1.5`}
@@ -122,15 +146,22 @@ export function GuildsTab({
         </EmptyState>
       )}
 
-      {sorted.map((g) => (
+      {sorted.map((g) => {
+        const stale = staleMembersOf(g);
+        const isStale = stale.length > 0;
+        return (
         <button
           key={g.id}
-          className={`${card} flex w-full flex-wrap items-center justify-between gap-3 text-left transition hover:border-pal/50`}
+          className={`${card} flex w-full flex-wrap items-center justify-between gap-3 text-left transition hover:border-pal/50 ${isStale ? "!border-red-500/70 bg-red-500/5" : ""}`}
           onClick={() => setDetailFor(g)}
         >
           <div className="min-w-0">
             <p className="flex items-center gap-2 text-sm font-extrabold">
-              <FiHome className="size-4 shrink-0 text-pal" />
+              {isStale ? (
+                <FiAlertTriangle className="size-4 shrink-0 text-red-500" />
+              ) : (
+                <FiHome className="size-4 shrink-0 text-pal" />
+              )}
               <span className="truncate">{g.name}</span>
               {g.baseCampLevel !== null && (
                 <span className="rounded-full bg-card-soft px-2 py-0.5 text-xs font-bold text-ink-muted">
@@ -140,6 +171,9 @@ export function GuildsTab({
             </p>
             <p className="mt-1 text-[13px] text-ink-muted">
               {t("{n} 名成員", { n: g.members.length })} · {t("{n} 個據點", { n: g.bases.length })}
+              {isStale && (
+                <> · <span className="font-bold text-red-500">{t("{n} 名成員 {x} 日未上線", { n: stale.length, x: staleThreshold ?? 0 })}</span></>
+              )}
               {g.storage !== null && <> · {t("倉庫 {n} 種物品", { n: g.storage.length })}</>}
               {g.research?.currentId && (
                 <> · {t("研究中:{id}", { id: researchName(gameData, g.research.currentId) })}</>
@@ -148,7 +182,8 @@ export function GuildsTab({
           </div>
           <FiChevronRight className="size-4 shrink-0 text-ink-muted" />
         </button>
-      ))}
+        );
+      })}
 
       {detailFor && (
         <GuildDetailModal
