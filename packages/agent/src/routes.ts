@@ -30,7 +30,7 @@ import {
   type DirEntry,
 } from "@palserver/shared";
 import { fetchServerCommands, rconExec, requireRcon, setRconBase64Resolver } from "./rcon.js";
-import type { PresenceTracker } from "./presence.js";
+import { compareKnownPlayers, type PresenceTracker } from "./presence.js";
 import type { BackupScheduler } from "./backup-scheduler.js";
 import type { RestartSupervisor } from "./supervisor.js";
 import type { PublicMapPublisher } from "./public-map.js";
@@ -1520,7 +1520,7 @@ export function registerRoutes(
     const own = presence.knownPlayers(rec.id);
     const pd = await getPdPlayers(rec, ctxOf(rec));
     if (!pd.available) return own;
-    return mergeKnownPlayers(own, pd.players);
+    return mergeKnownPlayers(own, pd.players).sort(compareKnownPlayers);
   };
 
   app.get("/api/instances/:id/players/known", async (req) => {

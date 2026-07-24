@@ -29,6 +29,14 @@ interface PresenceFile {
 
 const empty = (): PresenceFile => ({ known: {}, events: [], sessionStart: {} });
 
+/**
+ * 統一名冊排序:線上玩家在前,同群組內依 lastSeen 降序(最近上線在上、最久未上線在下)。
+ * 無 agent 歷史(lastSeen === "")的玩家排最後 —— "".localeCompare(iso) < 0。
+ */
+export function compareKnownPlayers(a: KnownPlayer, b: KnownPlayer): number {
+  return a.online === b.online ? b.lastSeen.localeCompare(a.lastSeen) : a.online ? -1 : 1;
+}
+
 export class PresenceTracker {
   private timer: NodeJS.Timeout | null = null;
 
@@ -64,9 +72,7 @@ export class PresenceTracker {
   }
 
   knownPlayers(id: string): KnownPlayer[] {
-    return Object.values(this.read(id).known).sort((a, b) =>
-      a.online === b.online ? b.lastSeen.localeCompare(a.lastSeen) : a.online ? -1 : 1,
-    );
+    return Object.values(this.read(id).known).sort(compareKnownPlayers);
   }
 
   events(id: string, limit: number): PresenceEvent[] {
