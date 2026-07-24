@@ -28,7 +28,7 @@ import {
   type RconCommandsResponse,
   type DirEntry,
 } from "@palserver/shared";
-import { fetchServerCommands, rconExec, requireRcon } from "./rcon.js";
+import { fetchServerCommands, rconExec, requireRcon, setRconBase64Resolver } from "./rcon.js";
 import type { PresenceTracker } from "./presence.js";
 import type { BackupScheduler } from "./backup-scheduler.js";
 import type { RestartSupervisor } from "./supervisor.js";
@@ -98,7 +98,7 @@ import {
   restoreConfigSnapshot,
 } from "./config-backup.js";
 import { getPalDefenderConfig, writePalDefenderConfig } from "./paldefender-config.js";
-import { getPlayerDetail, getPdPlayers, getPdGuilds, getPdGuild, getPdRestStatus, setPdRestEnabled, setPdRestPort, provisionPdToken, deleteBase } from "./paldefender-rest.js";
+import { getPlayerDetail, getPdPlayers, getPdGuilds, getPdGuild, getPdRestStatus, setPdRestEnabled, setPdRestPort, provisionPdToken, deleteBase, sendPdAlert } from "./paldefender-rest.js";
 import { mergeKnownPlayers } from "./player-roster.js";
 import { setTelemetryEnabled, telemetryStatus, track } from "./telemetry.js";
 import { licenseStatus, setLicenseKey, clearLicenseKey, featureEnabled } from "./license.js";
@@ -263,6 +263,11 @@ export function registerRoutes(
 ): void {
   const ctxOf = (rec: InstanceRecord): DriverContext => ({
     instanceDir: store.instanceDir(rec.id),
+  });
+  setRconBase64Resolver(async (rec) => {
+    const mod = (await getModsStatus(rec, ctxOf(rec))).paldefender;
+    if (!mod.installed || mod.enabled === false) return false;
+    return (await getPalDefenderConfig(rec, ctxOf(rec))).values.RCONbase64 === true;
   });
   const snapshotBefore = async (rec: InstanceRecord, reason: string): Promise<void> => {
     if (rec.backend === "docker") return;
@@ -1278,6 +1283,7 @@ export function registerRoutes(
           await pd.preConfigureRestApi(rec, ctxOf(rec), newPort).catch(() => {});
           // Create token file (PD reads Tokens/ dir on boot).
           await pd.provisionPdToken(rec, ctxOf(rec), false).catch(() => {});
+          pd.preprovisionPdRconBase64(rec, ctxOf(rec));
         }
       } catch { /* PD config is best-effort */ }
     }
@@ -1590,6 +1596,11 @@ export function registerRoutes(
   app.post("/api/instances/:id/rcon", async (req) => {
     const rec = getOr404((req.params as { id: string }).id);
     const { command } = z.object({ command: z.string().min(1).max(500) }).parse(req.body);
+    const alert = /^\/?alert\s+([\s\S]+)$/i.exec(command);
+    if (alert) {
+      await sendPdAlert(rec, ctxOf(rec), alert[1]);
+      return { command, output: "OK" };
+    }
     const output = await rconExec(rec, command);
     return { command, output };
   });
@@ -1714,6 +1725,7 @@ export function registerRoutes(
 
   app.put("/api/instances/:id/paldefender-config", async (req) => {
     const rec = getOr404((req.params as { id: string }).id);
+    const previous = await getPalDefenderConfig(rec, ctxOf(rec));
     const shape = Object.fromEntries(
       Object.entries(PALDEFENDER_OPTIONS).map(([key, meta]) => {
         if (meta.type === "bool") return [key, z.boolean().optional()];
@@ -1730,7 +1742,8 @@ export function registerRoutes(
       .parse(req.body);
     const status = await writePalDefenderConfig(rec, ctxOf(rec), patch as PalDefenderConfigPatch);
     // Try to hot-apply without a restart; harmless if RCON is off.
-    await rconExec(rec, "reloadcfg").catch(() => {});
+    // The server still speaks the previous mode until reloadcfg completes.
+    await rconExec(rec, "reloadcfg", { base64: previous.values.RCONbase64 === true }).catch(() => {});
     return { ...status, applied: "reloaded" };
   });
 
