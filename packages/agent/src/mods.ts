@@ -331,8 +331,11 @@ function releaseVersion(component: ModComponent, release: GitRelease): string {
 }
 
 /**
- * 固定 tag 資產可直接下載,不需要 GitHub REST API。HEAD 跟隨到 CDN 後用 Last-Modified
- * 保留原本的建置日期版本判斷;直鏈不存在才回 null 讓呼叫端走 API 相容路徑。
+ * 固定 tag 資產可直接下載,不需要 GitHub REST API。HEAD 跟隨到 CDN 後用 Last-Modified 當建置日期版本;
+ * 直鏈不存在才回 null 讓呼叫端走 API 相容路徑。
+ * 版本日期一律取「標準版資產」——更新徽章(latestModVersions)永遠查 stable,beta(zDev)已裝版本
+ * 也用同一來源,兩者才不會因兩個資產上傳時刻不同而被誤判成「有新版」(固定 tag 的資產同屬一個 release、
+ * 一起發布)。下載連結(url)仍依 channel 指向對的資產(stable=標準版、beta=zDev)。
  */
 export async function resolveFixedTagDownload(
   component: ModComponent,
@@ -340,11 +343,15 @@ export async function resolveFixedTagDownload(
 ): Promise<{ version: string; url: string } | null> {
   const cfg = GH_REPOS[component];
   if (!cfg.tag) return null;
-  const assetName = channel === "beta" ? (cfg.betaAssetName ?? cfg.assetName) : cfg.assetName;
-  if (!assetName) return null;
-  const url = `https://github.com/${cfg.repo}/releases/download/${encodeURIComponent(cfg.tag)}/${encodeURIComponent(assetName)}`;
+  const dlName = channel === "beta" ? (cfg.betaAssetName ?? cfg.assetName) : cfg.assetName;
+  if (!dlName) return null;
+  // 版本日期一律以標準版資產為準(見上方註解);缺 assetName 才退回下載用的資產名。
+  const verName = cfg.assetName ?? dlName;
+  const assetUrl = (name: string) =>
+    `https://github.com/${cfg.repo}/releases/download/${encodeURIComponent(cfg.tag!)}/${encodeURIComponent(name)}`;
+  const dlUrl = assetUrl(dlName);
   try {
-    const res = await fetch(url, {
+    const res = await fetch(assetUrl(verName), {
       method: "HEAD",
       redirect: "follow",
       headers: { "user-agent": "palserver-gui" },
@@ -354,7 +361,7 @@ export async function resolveFixedTagDownload(
     const modified = res.headers.get("last-modified");
     const timestamp = modified ? Date.parse(modified) : NaN;
     const date = Number.isFinite(timestamp) ? new Date(timestamp).toISOString().slice(0, 10) : null;
-    return { version: date ? `${cfg.tag} (${date})` : cfg.tag, url };
+    return { version: date ? `${cfg.tag} (${date})` : cfg.tag, url: dlUrl };
   } catch {
     return null;
   }
