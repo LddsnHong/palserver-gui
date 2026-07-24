@@ -337,7 +337,6 @@ export function registerRoutes(
       return false;
     }
     try {
-      const { execFileSync } = require("node:child_process");
       execFileSync("wine", ["--version"], { stdio: "ignore", timeout: 3000 });
       wineAvailableCache = true;
     } catch {
