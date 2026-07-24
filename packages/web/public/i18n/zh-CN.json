@@ -1940,5 +1940,8 @@
   "透過 Telegram Bot 發送。網址填 https://api.telegram.org/bot<你的BOT_TOKEN>/sendMessage,並在下方填 Chat ID(群組/頻道/使用者 id,或 @頻道名);先把 Bot 加進該群組/頻道。": "通过 Telegram Bot 发送。网址填 https://api.telegram.org/bot<你的BOT_TOKEN>/sendMessage,并在下方填 Chat ID(群组/频道/用户 id,或 @频道名);先把 Bot 加进该群组/频道。",
   "荒廢公會篩選:標出有成員超過": "荒废公会筛选:标出有成员超过",
   "日未上線": "日未上线",
-  "{n} 名成員 {x} 日未上線": "{n} 名成员 {x} 日未上线"
+  "{n} 名成員 {x} 日未上線": "{n} 名成员 {x} 日未上线",
+  "{n} 天前": "{n} 天前",
+  "今天": "今天",
+  "未知": "未知"
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   FiUsers,
   FiSlash,
@@ -38,6 +38,8 @@ import {
   type ModerationLists,
   type PresenceEvent,
   type RestPlayer,
+  type SavePlayerProfile,
+  type SavePlayersSummary,
 } from "@palserver/shared";
 import type { AgentClient } from "./api";
 import { t, useI18n } from "./i18n";
@@ -73,6 +75,8 @@ export function PlayersTab({
   const gameData = useGameData();
   const [live, setLive] = useState<LiveStatus | null>(null);
   const [known, setKnown] = useState<KnownPlayer[]>([]);
+  // 存檔掃描的玩家檔案(含可靠的 lastOnlineDaysAgo);離線玩家顯示上線時間用。
+  const [saveSnapshot, setSaveSnapshot] = useState<SavePlayersSummary | null>(null);
   const [events, setEvents] = useState<PresenceEvent[]>([]);
   const [moderation, setModeration] = useState<ModerationLists>(EMPTY_MODERATION);
   const [error, setError] = useState<string | null>(null);
@@ -83,22 +87,29 @@ export function PlayersTab({
   // 一次性重整，平常定期更新走 WebSocket 推播。
   const refresh = useCallback(async () => {
     try {
-      const [liveStatus, knownPlayers, presenceEvents, mod] = await Promise.all([
+      const [liveStatus, knownPlayers, presenceEvents, mod, snap] = await Promise.all([
         client.live(instanceId),
         client.knownPlayers(instanceId).catch(() => []),
         client.presenceEvents(instanceId, 50).catch(() => []),
         client.moderation(instanceId).catch(() => EMPTY_MODERATION),
+        client.playersSnapshot(instanceId).catch(() => null),
       ]);
       setLive(liveStatus);
       setKnown(knownPlayers);
       setEvents(presenceEvents);
       setModeration(mod);
+      setSaveSnapshot(snap);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
   }, [client, instanceId]);
 
+  const saveByUid = useMemo(() => {
+    const m = new Map<string, Omit<SavePlayerProfile, "pals">>();
+    for (const p of saveSnapshot?.players ?? []) m.set(normUid(p.uid), p);
+    return m;
+  }, [saveSnapshot]);
   const bannedIds = new Set(moderation.bans.map((b) => b.userId).filter((x): x is string => !!x));
   const whitelistedIds = new Set(moderation.whitelist.filter((w) => !w.isIp).map((w) => w.value));
 
@@ -215,6 +226,7 @@ export function PlayersTab({
         <EmptyState icon={<FiUsers />} title={t("目前無法連線到伺服器的 REST API")}>{live.reason}</EmptyState>
         <KnownPlayersCard
           known={known}
+          saveByUid={saveByUid}
           gameData={gameData}
           client={client}
           instanceId={instanceId}
@@ -341,6 +353,7 @@ export function PlayersTab({
 
       <KnownPlayersCard
         known={known}
+        saveByUid={saveByUid}
         gameData={gameData}
         client={client}
         instanceId={instanceId}
@@ -379,13 +392,16 @@ const fmtPlaytime = (seconds: number) => {
   return h > 0 ? t("{h} 小時 {m} 分", { h, m }) : t("{m} 分", { m });
 };
 
-const fmtWhen = (iso: string) => new Date(iso).toLocaleString();
+const fmtWhen = (iso: string) => (iso ? new Date(iso).toLocaleString() : "");
+/** uid 正規化(去符號小寫)用於 KnownPlayer.userId ↔ SavePlayerProfile.uid 比對。 */
+const normUid = (s: string) => s.replace(/[^0-9a-z]/gi, "").toLowerCase();
 
 /** 離線玩家名冊:在線玩家已經有獨立的「在線玩家」卡片,這裡只列離線的,不重複。
  * 名單來源:agent 有開 PalDefender REST 時走它的名冊(含存檔內所有離線玩家),否則用
  * agent 自己記錄的。有 agent 歷史(首見時間)的才顯示等級 / 遊玩時長等統計。 */
 function KnownPlayersCard({
   known,
+  saveByUid,
   gameData,
   client,
   instanceId,
@@ -395,6 +411,7 @@ function KnownPlayersCard({
   onUnban,
 }: {
   known: KnownPlayer[];
+  saveByUid?: Map<string, Omit<SavePlayerProfile, "pals">>;
   gameData: GameData | null;
   client: AgentClient;
   instanceId: string;
@@ -418,6 +435,16 @@ function KnownPlayersCard({
         <div className="flex flex-col divide-y divide-line">
           {offline.map((p) => {
             const hasHistory = !!p.firstSeen; // agent 記錄過(PalDefender-only 玩家沒有)
+            const sav = saveByUid?.get(normUid(p.userId));
+            const days = sav?.lastOnlineDaysAgo;
+            const lastOnline =
+              days != null
+                ? days === 0
+                  ? t("今天")
+                  : t("{n} 天前", { n: days })
+                : p.lastSeen
+                  ? fmtWhen(p.lastSeen)
+                  : t("未知");
             return (
               <div key={p.userId} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-5 py-3">
                 <button onClick={() => onOpen(p.userId, p.name)} title={t("查看帕魯與背包")} className="transition hover:opacity-80">
@@ -439,12 +466,10 @@ function KnownPlayersCard({
                     <SteamId userId={p.userId} />
                   </p>
                 </div>
-                {hasHistory && (
-                  <div className="text-right text-xs text-ink-muted">
-                    <p>{t("最後上線")} {fmtWhen(p.lastSeen)}</p>
-                    <p>{t("首次出現")} {fmtWhen(p.firstSeen)}</p>
-                  </div>
-                )}
+                <div className="text-right text-xs text-ink-muted">
+                  <p>{t("最後上線")} {lastOnline}</p>
+                  {hasHistory && <p>{t("首次出現")} {fmtWhen(p.firstSeen)}</p>}
+                </div>
                 {bannedIds && (
                   bannedIds.has(p.userId) ? (
                     <button

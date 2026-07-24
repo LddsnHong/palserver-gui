@@ -1930,5 +1930,8 @@
   "透過 Telegram Bot 發送。網址填 https://api.telegram.org/bot<你的BOT_TOKEN>/sendMessage,並在下方填 Chat ID(群組/頻道/使用者 id,或 @頻道名);先把 Bot 加進該群組/頻道。": "Sends via a Telegram bot. Set the URL to https://api.telegram.org/bot<YOUR_BOT_TOKEN>/sendMessage and enter the Chat ID below (group/channel/user id, or @channelname); add the bot to that group/channel first.",
   "荒廢公會篩選:標出有成員超過": "Abandoned-guild filter: highlight guilds with a member inactive over",
   "日未上線": "days",
-  "{n} 名成員 {x} 日未上線": "{n} member(s) inactive {x}+ days"
+  "{n} 名成員 {x} 日未上線": "{n} member(s) inactive {x}+ days",
+  "{n} 天前": "{n} days ago",
+  "今天": "Today",
+  "未知": "Unknown"
 }
