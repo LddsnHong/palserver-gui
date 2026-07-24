@@ -162,7 +162,7 @@ export interface WebhookEnvelope<T = unknown> {
 
 // ── Webhook 設定 ────────────────────────────────────────────────────────
 
-export type WebhookFormat = "generic" | "discord";
+export type WebhookFormat = "generic" | "discord" | "feishu" | "slack";
 
 export interface WebhookConfig {
   id: string;
@@ -380,9 +380,7 @@ function bossLabel(d: Record<string, unknown>, lang: BotLang): string {
  *  bot(同機通知)共用同一份渲染,確保兩條路徑的訊息一致。純函式,不簽章。
  *  lang 預設 zh-TW(webhook 系統目前無語言設定,維持既有行為);bot 通知會帶使用者設定的語言。 */
 export function toDiscordPayload(env: WebhookEnvelope, lang: BotLang = "zh-TW"): { embeds: unknown[] } {
-  const d = env.data as Record<string, unknown>;
-  const build = EVENT_TEXT[env.type]?.[lang];
-  const t = build ? build(d, lang) : { title: env.type, description: "" };
+  const t = eventSummary(env, lang);
   return {
     embeds: [
       {
@@ -394,4 +392,29 @@ export function toDiscordPayload(env: WebhookEnvelope, lang: BotLang = "zh-TW"):
       },
     ],
   };
+}
+
+/** 事件 → 一段「標題 / 說明」摘要(discord embed 與飞书/Slack 純文字訊息共用同一份四語渲染)。 */
+function eventSummary(env: WebhookEnvelope, lang: BotLang): { title: string; description: string } {
+  const d = env.data as Record<string, unknown>;
+  const build = EVENT_TEXT[env.type]?.[lang];
+  return build ? build(d, lang) : { title: env.type, description: "" };
+}
+
+/** 把事件信封轉成飞书(Lark)自訂機器人的文字訊息 payload。飞书只吃 {msg_type, content},
+ *  送 generic/discord 格式它會回 HTTP 200 但 code≠0 靜默丟棄(見 issue #58)。 */
+export function toFeishuPayload(
+  env: WebhookEnvelope,
+  lang: BotLang = "zh-TW",
+): { msg_type: "text"; content: { text: string } } {
+  const s = eventSummary(env, lang);
+  const text = [`[${env.instance.name}] ${s.title}`, s.description].filter(Boolean).join("\n");
+  return { msg_type: "text", content: { text } };
+}
+
+/** 把事件信封轉成 Slack incoming webhook 的文字訊息 payload({text},支援 mrkdwn)。 */
+export function toSlackPayload(env: WebhookEnvelope, lang: BotLang = "zh-TW"): { text: string } {
+  const s = eventSummary(env, lang);
+  const text = [`*${s.title}*`, s.description, `_${env.instance.name}_`].filter(Boolean).join("\n");
+  return { text };
 }

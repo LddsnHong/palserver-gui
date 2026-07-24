@@ -2050,7 +2050,7 @@ export function registerRoutes(
   const webhookInput = z.object({
     url: z.string().url(),
     events: z.array(z.string().min(1)).min(1),
-    format: z.enum(["generic", "discord"]).optional(),
+    format: z.enum(["generic", "discord", "feishu", "slack"]).optional(),
     label: z.string().max(80).optional(),
     enabled: z.boolean().optional(),
   });

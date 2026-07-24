@@ -6,6 +6,8 @@ import {
   WEBHOOK_HEADERS,
   eventMatches,
   toDiscordPayload,
+  toFeishuPayload,
+  toSlackPayload,
   type WebhookConfig,
   type WebhookConfigPublic,
   type WebhookEnvelope,
@@ -127,13 +129,26 @@ interface DeliverResult {
   error?: string;
 }
 
+function payloadFor(wh: StoredWebhook, env: WebhookEnvelope): string {
+  switch (wh.format) {
+    case "discord":
+      return JSON.stringify(toDiscordPayload(env));
+    case "feishu":
+      return JSON.stringify(toFeishuPayload(env));
+    case "slack":
+      return JSON.stringify(toSlackPayload(env));
+    default:
+      return JSON.stringify(env);
+  }
+}
+
 async function deliver(wh: StoredWebhook, env: WebhookEnvelope, agentVersion: string): Promise<DeliverResult> {
-  const body =
-    wh.format === "discord" ? JSON.stringify(toDiscordPayload(env)) : JSON.stringify(env);
+  const body = payloadFor(wh, env);
+  // 只有 generic 帶 HMAC 簽章;discord/feishu/slack 是第三方固定格式,送純 JSON。
   const headers =
-    wh.format === "discord"
-      ? { "Content-Type": "application/json", "User-Agent": `palserver-agent/${agentVersion}` }
-      : buildGenericHeaders(wh.secret, env, Math.floor(Date.now() / 1000).toString(), body, agentVersion);
+    wh.format === "generic"
+      ? buildGenericHeaders(wh.secret, env, Math.floor(Date.now() / 1000).toString(), body, agentVersion)
+      : { "Content-Type": "application/json", "User-Agent": `palserver-agent/${agentVersion}` };
   try {
     const res = await fetch(wh.url, {
       method: "POST",
@@ -141,6 +156,18 @@ async function deliver(wh: StoredWebhook, env: WebhookEnvelope, agentVersion: st
       body,
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
+    // 飞书即使 body 不合法也回 HTTP 200,真正結果在回應的 code 欄位(成功 = 0)。不看它會把
+    // 「格式不符、訊息其實沒送出」誤判成功(issue #58)。Slack 失敗會直接回非 2xx,res.ok 已足夠。
+    if (wh.format === "feishu" && res.ok) {
+      const data = (await res.json().catch(() => null)) as
+        | { code?: number; StatusCode?: number; msg?: string; StatusMessage?: string }
+        | null;
+      const code = data?.code ?? data?.StatusCode;
+      if (code !== undefined && code !== 0) {
+        const msg = data?.msg ?? data?.StatusMessage ?? "";
+        return { ok: false, status: res.status, error: `飞书拒收(code ${code}${msg ? `: ${msg}` : ""})`.slice(0, 160) };
+      }
+    }
     return { ok: res.ok, status: res.status };
   } catch (e) {
     return { ok: false, error: (e instanceof Error ? e.message : String(e)).slice(0, 160) };

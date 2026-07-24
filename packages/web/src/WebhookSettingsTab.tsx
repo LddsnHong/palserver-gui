@@ -49,6 +49,36 @@ function emptyDraft(): Draft {
   return { url: "", label: "", format: "generic", enabled: true, selected: new Set() };
 }
 
+/** webhook 格式的顯示名稱(t 於呼叫時讀當前語言,故隨語言切換更新)。 */
+function formatLabel(f: WebhookFormat): string {
+  switch (f) {
+    case "discord":
+      return t("Discord(Incoming Webhook)");
+    case "feishu":
+      return t("飞书 / Lark(自訂機器人)");
+    case "slack":
+      return t("Slack(Incoming Webhook)");
+    default:
+      return t("自訂端點(HMAC 簽章)");
+  }
+}
+
+/** 各格式的說明文字。 */
+function formatHelp(f: WebhookFormat): string {
+  switch (f) {
+    case "discord":
+      return t("直接以 Discord Incoming Webhook 格式發送 embed 訊息,貼上 Discord 頻道設定裡的 Webhook 網址即可。");
+    case "feishu":
+      return t(
+        "以飞书(Lark)自訂機器人的文字訊息格式發送,貼上群組自訂機器人的 Webhook 網址。機器人安全設定請用「自訂關鍵詞」(並確保訊息含該詞)或「IP 白名單」;目前尚未支援「簽章校驗」模式。",
+      );
+    case "slack":
+      return t("以 Slack Incoming Webhook 的文字訊息格式發送,貼上 Slack App 的 Incoming Webhook 網址即可。");
+    default:
+      return t("以 JSON 格式 POST 到你的伺服器,並附上 HMAC-SHA256 簽章(X-Palserver-Signature)供你驗證來源。");
+  }
+}
+
 /** 既有設定 → 表單草稿:用 eventMatches 把「精確型別 / 命名空間萬用字元 / 全部」統一展開回勾選集合。 */
 function draftFromConfig(c: WebhookConfigPublic): Draft {
   return {
@@ -347,7 +377,7 @@ export function WebhookSettingsTab({ client, instanceId }: { client: AgentClient
                     </div>
                     <div className="flex flex-wrap items-center gap-1.5">
                       <span className="rounded-full bg-card-soft px-2 py-0.5 text-[11px] font-bold text-ink-muted">
-                        {wh.format === "discord" ? t("Discord(Incoming Webhook)") : t("自訂端點(HMAC 簽章)")}
+                        {formatLabel(wh.format)}
                       </span>
                       <span
                         className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
@@ -566,12 +596,10 @@ function WebhookForm({
         <Select value={draft.format} onChange={(e) => setDraft({ ...draft, format: e.target.value as WebhookFormat })}>
           <option value="generic">{t("自訂端點(HMAC 簽章)")}</option>
           <option value="discord">{t("Discord(Incoming Webhook)")}</option>
+          <option value="feishu">{t("飞书 / Lark(自訂機器人)")}</option>
+          <option value="slack">{t("Slack(Incoming Webhook)")}</option>
         </Select>
-        <span className="text-[11px] font-normal text-ink-muted">
-          {draft.format === "discord"
-            ? t("直接以 Discord Incoming Webhook 格式發送 embed 訊息,貼上 Discord 頻道設定裡的 Webhook 網址即可。")
-            : t("以 JSON 格式 POST 到你的伺服器,並附上 HMAC-SHA256 簽章(X-Palserver-Signature)供你驗證來源。")}
-        </span>
+        <span className="text-[11px] font-normal text-ink-muted">{formatHelp(draft.format)}</span>
       </label>
       <label className="inline-flex w-fit cursor-pointer items-center gap-2 text-sm font-bold">
         <input
