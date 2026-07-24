@@ -40,6 +40,11 @@ export function GuildsTab({
     staleThreshold === null
       ? []
       : g.members.filter((m) => m.lastOnlineDaysAgo != null && m.lastOnlineDaysAgo >= staleThreshold);
+  // 活躍度:公會最近上線成員的 daysAgo(小=活躍);無資料視為最不活躍(Infinity→排底)。
+  const latestActiveDaysAgo = (g: SaveGuild): number => {
+    const days = g.members.map((m) => m.lastOnlineDaysAgo).filter((d): d is number => d != null);
+    return days.length ? Math.min(...days) : Number.POSITIVE_INFINITY;
+  };
 
   const load = useCallback(async () => {
     try {
@@ -93,7 +98,11 @@ export function GuildsTab({
     }
   };
 
-  const sorted = [...(guilds ?? [])].sort((a, b) => b.members.length - a.members.length);
+  const sorted = [...(guilds ?? [])].sort((a, b) => {
+    const baseDiff = b.bases.length - a.bases.length; // 主鍵:據點數降序(多據點=活躍,在上)
+    if (baseDiff !== 0) return baseDiff;
+    return latestActiveDaysAgo(a) - latestActiveDaysAgo(b); // 次鍵:活躍(小)在上
+  });
 
   return (
     <div className="flex flex-col gap-4">
