@@ -1927,5 +1927,8 @@
   "以企業微信群機器人的文字訊息格式發送,貼上群機器人的 Webhook 網址(qyapi.weixin.qq.com/…?key=…)即可。": "WeCom(企業微信)グループボットのテキストメッセージ形式で送信します。グループボットの Webhook URL(qyapi.weixin.qq.com/…?key=…)を貼り付けるだけです。",
   "以钉钉自訂機器人的文字訊息格式發送,貼上機器人的 Webhook 網址。安全設定請用「自訂關鍵詞」(訊息需含該詞)或「IP 白名單」;暫不支援「加簽」模式。": "DingTalk(钉钉)カスタムボットのテキストメッセージ形式で送信します。ボットの Webhook URL を貼り付けてください。セキュリティ設定は「カスタムキーワード」(メッセージにそのキーワードを含める)または「IP ホワイトリスト」を使用してください。「署名(加签)」モードには対応していません。",
   "以 Google Chat Incoming Webhook 的文字訊息格式發送,貼上聊天室 Webhook 網址(chat.googleapis.com/…)即可。": "Google Chat Incoming Webhook のテキストメッセージ形式で送信します。スペースの Webhook URL(chat.googleapis.com/…)を貼り付けるだけです。",
-  "透過 Telegram Bot 發送。網址填 https://api.telegram.org/bot<你的BOT_TOKEN>/sendMessage,並在下方填 Chat ID(群組/頻道/使用者 id,或 @頻道名);先把 Bot 加進該群組/頻道。": "Telegram ボット経由で送信します。URL は https://api.telegram.org/bot<あなたのBOT_TOKEN>/sendMessage を入力し、下に Chat ID(グループ/チャンネル/ユーザー id、または @チャンネル名)を入力してください。先にボットをそのグループ/チャンネルに追加してください。"
+  "透過 Telegram Bot 發送。網址填 https://api.telegram.org/bot<你的BOT_TOKEN>/sendMessage,並在下方填 Chat ID(群組/頻道/使用者 id,或 @頻道名);先把 Bot 加進該群組/頻道。": "Telegram ボット経由で送信します。URL は https://api.telegram.org/bot<あなたのBOT_TOKEN>/sendMessage を入力し、下に Chat ID(グループ/チャンネル/ユーザー id、または @チャンネル名)を入力してください。先にボットをそのグループ/チャンネルに追加してください。",
+  "荒廢公會篩選:標出有成員超過": "荒廃ギルド絞り込み:メンバーが",
+  "日未上線": "日以上ログインしていない",
+  "{n} 名成員 {x} 日未上線": "{n} 名が {x} 日以上ログインせず"
 }
