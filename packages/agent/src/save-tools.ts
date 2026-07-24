@@ -488,8 +488,6 @@ interface ContainerIndex {
   paldeck: Map<string, string[]>;
   /** 轉換失敗必須回報，不能以空索引假裝健檢完整。 */
   conversionFailures: string[];
-  /** 玩家 uid(純 hex 小寫)→ Players/<uid>.sav 檔案 mtimeMs(最後上線現實時間)。 */
-  playerSavMtimes: Map<string, number>;
 }
 
 const savNameToUuid = (name: string): string => {
@@ -549,8 +547,7 @@ async function buildContainerIndex(convert: ConvertFn, playersDir: string, tmpDi
   const kinds = new Map<string, "party" | "palbox">();
   const itemOwners = new Map<string, { uid: string; kind: InventoryKind }>();
   const paldeck = new Map<string, string[]>();
-  const playerSavMtimes = new Map<string, number>();
-  if (!fs.existsSync(playersDir)) return { kinds, itemOwners, paldeck, conversionFailures: [], playerSavMtimes };
+  if (!fs.existsSync(playersDir)) return { kinds, itemOwners, paldeck, conversionFailures: [] };
   const conversionFailures: string[] = [];
   const files = fs
     .readdirSync(playersDir)
@@ -574,8 +571,6 @@ async function buildContainerIndex(convert: ConvertFn, playersDir: string, tmpDi
       if (storage) kinds.set(normGuid(storage), "palbox");
 
       const uid = savNameToUuid(f);
-      // 記錄玩家 .sav 原檔 mtime(=最後上線現實時間);copy 的 mtime 會變,必取原檔。
-      playerSavMtimes.set(normGuid(uid), fs.statSync(path.join(playersDir, f)).mtimeMs);
       const invInfo = (sd?.InventoryInfo ?? sd?.inventoryInfo) as
         | { value?: Record<string, IdProp> }
         | undefined;
@@ -594,7 +589,7 @@ async function buildContainerIndex(convert: ConvertFn, playersDir: string, tmpDi
       fs.rmSync(out, { force: true });
     }
   }
-  return { kinds, itemOwners, paldeck, conversionFailures, playerSavMtimes };
+  return { kinds, itemOwners, paldeck, conversionFailures };
 }
 
 async function runJob(rec: InstanceRecord, ctx: DriverContext, worldGuid: string): Promise<SaveHealthReport> {
@@ -662,7 +657,7 @@ async function runJob(rec: InstanceRecord, ctx: DriverContext, worldGuid: string
     job.phase = "convert";
     job.pct = null; // 子行程無進度回報
     // 先解析玩家檔(小,秒級)建容器對照 → 帕魯位置分類 + 離線物品歸屬 + 圖鑑紀錄
-    const { kinds, itemOwners, paldeck, conversionFailures, playerSavMtimes } = await buildContainerIndex(
+    const { kinds, itemOwners, paldeck, conversionFailures } = await buildContainerIndex(
       convert,
       path.join(worldDir, "Players"),
       tmpDir,
@@ -684,7 +679,7 @@ async function runJob(rec: InstanceRecord, ctx: DriverContext, worldGuid: string
       (pct) => {
         job.pct = pct;
       },
-      { containerKinds: kinds, itemContainerOwners: itemOwners, playerSavMtimes },
+      { containerKinds: kinds, itemContainerOwners: itemOwners },
     );
 
     const report: SaveHealthReport = {
