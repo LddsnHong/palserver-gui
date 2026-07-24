@@ -10,6 +10,7 @@ import {
   toSlackPayload,
   toMsgTypeTextPayload,
   toGoogleChatPayload,
+  toTelegramPayload,
   type WebhookConfig,
   type WebhookConfigPublic,
   type WebhookEnvelope,
@@ -144,6 +145,8 @@ function payloadFor(wh: StoredWebhook, env: WebhookEnvelope): string {
       return JSON.stringify(toMsgTypeTextPayload(env));
     case "googlechat":
       return JSON.stringify(toGoogleChatPayload(env));
+    case "telegram":
+      return JSON.stringify(toTelegramPayload(env, wh.chatId ?? ""));
     default:
       return JSON.stringify(env);
   }
@@ -338,7 +341,7 @@ export class WebhooksService {
 
   create(
     id: string,
-    input: { url: string; events: string[]; format?: WebhookFormat; label?: string; enabled?: boolean },
+    input: { url: string; events: string[]; format?: WebhookFormat; chatId?: string; label?: string; enabled?: boolean },
   ): Promise<{ config: WebhookConfigPublic; secret: string }> {
     return this.serialize(id, async () => {
       const cfg = readConfig(this.store, id);
@@ -349,6 +352,7 @@ export class WebhooksService {
         url: input.url,
         events: input.events,
         format: input.format ?? "generic",
+        chatId: input.chatId,
         enabled: input.enabled ?? true,
         createdAt: new Date().toISOString(),
         secret,
@@ -362,7 +366,7 @@ export class WebhooksService {
   update(
     id: string,
     whId: string,
-    patch: Partial<Pick<WebhookConfig, "url" | "events" | "format" | "enabled" | "label">>,
+    patch: Partial<Pick<WebhookConfig, "url" | "events" | "format" | "chatId" | "enabled" | "label">>,
   ): Promise<WebhookConfigPublic | null> {
     return this.serialize(id, async () => {
       const cfg = readConfig(this.store, id);
@@ -371,6 +375,7 @@ export class WebhooksService {
       if (patch.url !== undefined) wh.url = patch.url;
       if (patch.events !== undefined) wh.events = patch.events;
       if (patch.format !== undefined) wh.format = patch.format;
+      if (patch.chatId !== undefined) wh.chatId = patch.chatId;
       if (patch.enabled !== undefined) wh.enabled = patch.enabled;
       if (patch.label !== undefined) wh.label = patch.label;
       writeConfig(this.store, id, cfg);

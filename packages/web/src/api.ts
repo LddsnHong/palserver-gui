@@ -589,7 +589,7 @@ export class AgentClient {
   /** 新增 webhook;回傳的 secret 只在建立當下給一次,之後看不到,要當場顯示給使用者複製。 */
   createWebhook(
     id: string,
-    input: { url: string; events: string[]; format?: WebhookFormat; label?: string; enabled?: boolean },
+    input: { url: string; events: string[]; format?: WebhookFormat; chatId?: string; label?: string; enabled?: boolean },
   ): Promise<{ config: WebhookConfigPublic; secret: string }> {
     return this.request(`/api/instances/${id}/webhooks`, {
       method: "POST",
@@ -600,7 +600,7 @@ export class AgentClient {
   updateWebhook(
     id: string,
     whId: string,
-    patch: Partial<{ url: string; events: string[]; format: WebhookFormat; enabled: boolean; label: string }>,
+    patch: Partial<{ url: string; events: string[]; format: WebhookFormat; chatId: string; enabled: boolean; label: string }>,
   ): Promise<WebhookConfigPublic> {
     return this.request(`/api/instances/${id}/webhooks/${whId}`, {
       method: "PUT",

@@ -41,12 +41,13 @@ interface Draft {
   url: string;
   label: string;
   format: WebhookFormat;
+  chatId: string;
   enabled: boolean;
   selected: Set<WebhookEventType>;
 }
 
 function emptyDraft(): Draft {
-  return { url: "", label: "", format: "generic", enabled: true, selected: new Set() };
+  return { url: "", label: "", format: "generic", chatId: "", enabled: true, selected: new Set() };
 }
 
 /** webhook 格式的顯示名稱(t 於呼叫時讀當前語言,故隨語言切換更新)。 */
@@ -64,6 +65,8 @@ function formatLabel(f: WebhookFormat): string {
       return t("钉钉(自訂機器人)");
     case "googlechat":
       return t("Google Chat(Incoming Webhook)");
+    case "telegram":
+      return t("Telegram(Bot)");
     default:
       return t("自訂端點(HMAC 簽章)");
   }
@@ -86,6 +89,8 @@ function formatHelp(f: WebhookFormat): string {
       return t("以钉钉自訂機器人的文字訊息格式發送,貼上機器人的 Webhook 網址。安全設定請用「自訂關鍵詞」(訊息需含該詞)或「IP 白名單」;暫不支援「加簽」模式。");
     case "googlechat":
       return t("以 Google Chat Incoming Webhook 的文字訊息格式發送,貼上聊天室 Webhook 網址(chat.googleapis.com/…)即可。");
+    case "telegram":
+      return t("透過 Telegram Bot 發送。網址填 https://api.telegram.org/bot<你的BOT_TOKEN>/sendMessage,並在下方填 Chat ID(群組/頻道/使用者 id,或 @頻道名);先把 Bot 加進該群組/頻道。");
     default:
       return t("以 JSON 格式 POST 到你的伺服器,並附上 HMAC-SHA256 簽章(X-Palserver-Signature)供你驗證來源。");
   }
@@ -97,6 +102,7 @@ function draftFromConfig(c: WebhookConfigPublic): Draft {
     url: c.url,
     label: c.label ?? "",
     format: c.format,
+    chatId: c.chatId ?? "",
     enabled: c.enabled,
     selected: new Set(ALL_EVENT_TYPES.filter((ty) => eventMatches(c.events, ty))),
   };
@@ -193,6 +199,7 @@ export function WebhookSettingsTab({ client, instanceId }: { client: AgentClient
         url: createDraft.url.trim(),
         label: createDraft.label.trim() || undefined,
         format: createDraft.format,
+        chatId: createDraft.format === "telegram" ? createDraft.chatId.trim() : "",
         enabled: createDraft.enabled,
         events: serializeEvents(createDraft.selected),
       });
@@ -220,6 +227,7 @@ export function WebhookSettingsTab({ client, instanceId }: { client: AgentClient
         url: editDraft.url.trim(),
         label: editDraft.label.trim() || undefined,
         format: editDraft.format,
+        chatId: editDraft.format === "telegram" ? editDraft.chatId.trim() : "",
         enabled: editDraft.enabled,
         events: serializeEvents(editDraft.selected),
       });
@@ -613,9 +621,21 @@ function WebhookForm({
           <option value="wecom">{t("企業微信(群機器人)")}</option>
           <option value="dingtalk">{t("钉钉(自訂機器人)")}</option>
           <option value="googlechat">{t("Google Chat(Incoming Webhook)")}</option>
+          <option value="telegram">{t("Telegram(Bot)")}</option>
         </Select>
         <span className="text-[11px] font-normal text-ink-muted">{formatHelp(draft.format)}</span>
       </label>
+      {draft.format === "telegram" && (
+        <label className={labelCls}>
+          {t("Chat ID")}
+          <input
+            className={inputCls}
+            value={draft.chatId}
+            placeholder={t("例:-1001234567890 或 @我的頻道")}
+            onChange={(e) => setDraft({ ...draft, chatId: e.target.value })}
+          />
+        </label>
+      )}
       <label className="inline-flex w-fit cursor-pointer items-center gap-2 text-sm font-bold">
         <input
           type="checkbox"

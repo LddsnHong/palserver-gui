@@ -169,7 +169,8 @@ export type WebhookFormat =
   | "slack"
   | "wecom"
   | "dingtalk"
-  | "googlechat";
+  | "googlechat"
+  | "telegram";
 
 export interface WebhookConfig {
   id: string;
@@ -178,6 +179,8 @@ export interface WebhookConfig {
   /** 訂閱的事件:精確型別、命名空間萬用字元(如 "player.*")或全部("*")。 */
   events: string[];
   format: WebhookFormat;
+  /** telegram 格式限定:sendMessage 的 chat_id(群組/頻道/使用者 id,或 @頻道名)。其餘格式不用。 */
+  chatId?: string;
   enabled: boolean;
   createdAt: string;
   lastDelivery?: WebhookDeliveryResult;
@@ -433,6 +436,16 @@ export function toMsgTypeTextPayload(
 /** Google Chat incoming webhook 文字訊息({text})。 */
 export function toGoogleChatPayload(env: WebhookEnvelope, lang: BotLang = "zh-TW"): { text: string } {
   return { text: plainSummary(env, lang) };
+}
+
+/** Telegram Bot API sendMessage payload。url 需為 https://api.telegram.org/bot<TOKEN>/sendMessage,
+ *  chat_id 由設定的 chatId 提供(群組/頻道/使用者 id,或 @頻道名)。 */
+export function toTelegramPayload(
+  env: WebhookEnvelope,
+  chatId: string,
+  lang: BotLang = "zh-TW",
+): { chat_id: string; text: string } {
+  return { chat_id: chatId, text: plainSummary(env, lang) };
 }
 
 /** Slack incoming webhook 文字訊息({text},mrkdwn);Mattermost / Rocket.Chat 也相容此格式。 */

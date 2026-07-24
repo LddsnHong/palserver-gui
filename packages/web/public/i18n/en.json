@@ -1907,5 +1907,19 @@
   "這個據點沒有駐守工作帕魯。": "This base has no stationed worker Pals.",
   "工作帕魯": "Worker Pals",
   "使用 Base64 RCON 文字編碼": "Use Base64 RCON text encoding",
-  "讓 RCON 指令可安全傳送中文、日文與其他非 ASCII 文字。": "Allows RCON commands to safely transmit Chinese, Japanese, and other non-ASCII text."
+  "讓 RCON 指令可安全傳送中文、日文與其他非 ASCII 文字。": "Allows RCON commands to safely transmit Chinese, Japanese, and other non-ASCII text.",
+  "飞书 / Lark(自訂機器人)": "Feishu / Lark (custom bot)",
+  "Slack(Incoming Webhook)": "Slack (Incoming Webhook)",
+  "企業微信(群機器人)": "WeCom (group bot)",
+  "钉钉(自訂機器人)": "DingTalk (custom bot)",
+  "Google Chat(Incoming Webhook)": "Google Chat (Incoming Webhook)",
+  "Telegram(Bot)": "Telegram (Bot)",
+  "Chat ID": "Chat ID",
+  "例:-1001234567890 或 @我的頻道": "e.g. -1001234567890 or @mychannel",
+  "以飞书(Lark)自訂機器人的文字訊息格式發送,貼上群組自訂機器人的 Webhook 網址。機器人安全設定請用「自訂關鍵詞」(並確保訊息含該詞)或「IP 白名單」;目前尚未支援「簽章校驗」模式。": "Sends as a Feishu (Lark) custom-bot text message. Paste the group custom bot's webhook URL. For the bot's security setting use \"custom keywords\" (make sure the message contains the keyword) or \"IP allowlist\"; \"signature verification\" mode is not supported yet.",
+  "以 Slack Incoming Webhook 的文字訊息格式發送,貼上 Slack App 的 Incoming Webhook 網址即可(Mattermost、Rocket.Chat 也相容)。": "Sends as a Slack Incoming Webhook text message. Just paste your Slack App's Incoming Webhook URL (Mattermost and Rocket.Chat are also compatible).",
+  "以企業微信群機器人的文字訊息格式發送,貼上群機器人的 Webhook 網址(qyapi.weixin.qq.com/…?key=…)即可。": "Sends as a WeCom group-bot text message. Just paste the group bot's webhook URL (qyapi.weixin.qq.com/…?key=…).",
+  "以钉钉自訂機器人的文字訊息格式發送,貼上機器人的 Webhook 網址。安全設定請用「自訂關鍵詞」(訊息需含該詞)或「IP 白名單」;暫不支援「加簽」模式。": "Sends as a DingTalk custom-bot text message. Paste the bot's webhook URL. For the security setting use \"custom keywords\" (the message must contain the keyword) or \"IP allowlist\"; \"extra signature\" mode is not supported.",
+  "以 Google Chat Incoming Webhook 的文字訊息格式發送,貼上聊天室 Webhook 網址(chat.googleapis.com/…)即可。": "Sends as a Google Chat Incoming Webhook text message. Just paste the space's webhook URL (chat.googleapis.com/…).",
+  "透過 Telegram Bot 發送。網址填 https://api.telegram.org/bot<你的BOT_TOKEN>/sendMessage,並在下方填 Chat ID(群組/頻道/使用者 id,或 @頻道名);先把 Bot 加進該群組/頻道。": "Sends via a Telegram bot. Set the URL to https://api.telegram.org/bot<YOUR_BOT_TOKEN>/sendMessage and enter the Chat ID below (group/channel/user id, or @channelname); add the bot to that group/channel first."
 }

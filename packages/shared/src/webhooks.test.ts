@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toFeishuPayload, toSlackPayload, toDiscordPayload, toMsgTypeTextPayload, toGoogleChatPayload } from "./index.js";
+import {
+  toFeishuPayload,
+  toSlackPayload,
+  toDiscordPayload,
+  toMsgTypeTextPayload,
+  toGoogleChatPayload,
+  toTelegramPayload,
+} from "./index.js";
 import type { WebhookEnvelope } from "./index.js";
 
 // issue #58:飞书/Slack 需要各自的訊息格式,送 generic/discord body 會被靜默丟棄。
@@ -39,6 +46,13 @@ test("toMsgTypeTextPayload:企業微信 / 钉钉 shape 正確(msgtype/text.conte
 
 test("toGoogleChatPayload:Google Chat {text} shape 正確,帶伺服器名", () => {
   const p = toGoogleChatPayload(env);
+  assert.equal(typeof p.text, "string");
+  assert.ok(p.text.includes("我的伺服器"), "應含伺服器名");
+});
+
+test("toTelegramPayload:Telegram {chat_id,text} shape 正確,帶入 chatId 與伺服器名", () => {
+  const p = toTelegramPayload(env, "-1001234567890");
+  assert.equal(p.chat_id, "-1001234567890");
   assert.equal(typeof p.text, "string");
   assert.ok(p.text.includes("我的伺服器"), "應含伺服器名");
 });
