@@ -94,7 +94,6 @@ export function PerformanceTab({
   const cores = stats && Number.isFinite(stats.cpuCores) && stats.cpuCores > 0 ? stats.cpuCores : 1;
   const cpuPercent = stats && knownCpuSample(stats.cpuPercent) ? stats.cpuPercent : null; // 佔總算力 0–100%(後端正規化)
   const perCore = stats?.perCore ?? null;
-  const perCoreScope = stats?.perCoreScope ?? null;
   const memoryLimit = stats?.memoryLimitBytes ?? 0;
   const memoryRatio = stats && hasFiniteLimit(memoryLimit) ? clampRatio(stats.memoryBytes / memoryLimit) : null;
 
@@ -241,15 +240,6 @@ function Stat({
       </span>
       <span className="text-2xl font-extrabold">{value}</span>
       {sub && <span className="text-xs text-ink-muted">{sub}</span>}
-    </div>
-  );
-}
-
-function Row({ k, v }: { k: string; v: string }) {
-  return (
-    <div className="flex justify-between gap-3">
-      <dt className="text-ink-muted">{k}</dt>
-      <dd className="font-bold">{v}</dd>
     </div>
   );
 }

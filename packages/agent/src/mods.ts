@@ -170,8 +170,11 @@ function componentState(root: string, component: ModComponent): { installed: boo
  *  改版日的安全退路 —— 移除會連使用者的 Lua 模組一起刪,停用不會。
  *  僅支援 native Windows(檔案就在本機);需伺服器停止(DLL 鎖定)。 */
 export function setModEnabled(rec: InstanceRecord, ctx: DriverContext, component: ModComponent, enabled: boolean): void {
-  if (rec.backend !== "native" || process.platform !== "win32") {
-    throw Object.assign(new Error("停用/啟用僅支援 Windows 原生模式"), { statusCode: 409 });
+  if (rec.backend !== "native" || serverPlatform(rec) !== "windows") {
+    throw Object.assign(
+      new Error("停用/啟用僅支援原生模式的 Windows 伺服器(含 Linux 上以 Wine 執行的 Windows binary)"),
+      { statusCode: 409 },
+    );
   }
   const root = serverRoot(rec, ctx);
   for (const rel of DISABLE_TARGETS[component]) {

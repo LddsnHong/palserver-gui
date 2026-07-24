@@ -69,8 +69,6 @@ export function copyPortableData(srcRoot: string, destRoot: string): void {
  * Windows 10+, macOS and Linux, so no archive dependency is needed.
  */
 
-const CONFIG_PLATFORM_DIR = process.platform === "win32" ? "WindowsServer" : "LinuxServer";
-
 /**
  * Paths inside the game-server Pod are always Linux — the thijsvanloef/
  * palworld-server image mounts data under /palworld/ regardless of the host.
@@ -103,8 +101,18 @@ async function validateArchiveMembers(archive: string): Promise<void> {
  *  native: serverRoot/Pal/Saved, docker: instanceDir/saved. */
 const saveGamesDir = (savedRoot: string) => path.join(savedRoot, "SaveGames", "0");
 const backupsDir = (ctx: DriverContext) => path.join(ctx.instanceDir, "backups");
-const gameUserSettings = (savedRoot: string) =>
-  path.join(savedRoot, "Config", CONFIG_PLATFORM_DIR, "GameUserSettings.ini");
+/** GameUserSettings.ini 在 Pal/Saved 下的路徑。Config 子目錄由伺服器 binary 決定
+ *  (Windows binary,含 Linux 上的 Wine → WindowsServer;Linux binary → LinuxServer),
+ *  探測實際存在的那個比用 agent 平台推斷 robust(順帶修好 docker/native 上 Wine 的目錄錯配);
+ *  兩者都還沒生成時,有 rec 就用 binary 對應目錄(給主動建立的情況)、否則預設 WindowsServer。 */
+const gameUserSettings = (savedRoot: string, rec?: InstanceRecord) => {
+  const at = (dir: string) => path.join(savedRoot, "Config", dir, "GameUserSettings.ini");
+  const win = at("WindowsServer");
+  const lin = at("LinuxServer");
+  if (fs.existsSync(win)) return win;
+  if (fs.existsSync(lin)) return lin;
+  return rec ? at(configPlatformDir(rec)) : win;
+};
 
 /** Backends that expose the world-save tree for read/write. native and docker
  * read the host filesystem directly (docker via bind-mount); k8s reaches
@@ -124,10 +132,6 @@ const savedRoot = (rec: InstanceRecord, ctx: DriverContext): string =>
 
 /** saveGamesDir relative to the Pal/Saved directory. */
 const saveGamesFromSaved = (saved: string): string => path.join(saved, "SaveGames", "0");
-
-/** GameUserSettings.ini path relative to the Pal/Saved directory. */
-const gameUserSettingsFromSaved = (saved: string): string =>
-  path.join(saved, "Config", CONFIG_PLATFORM_DIR, "GameUserSettings.ini");
 
 export const serverRootOf = (rec: InstanceRecord, ctx: DriverContext) => serverRoot(rec, ctx);
 
@@ -864,8 +868,8 @@ export async function importExternalWorld(
     worldOptionsDisabled = true;
   }
 
-  // 設為啟用世界。GameUserSettings.ini 可能還不存在(實例從未啟動)→ 建最小檔。
-  const gus = gameUserSettings(saved);
+  // 設為啟用世界。GameUserSettings.ini 可能還不存在(實例從未啟動)→ 建最小檔(用 binary 對應目錄)。
+  const gus = gameUserSettings(saved, rec);
   fs.mkdirSync(path.dirname(gus), { recursive: true });
   const ini = fs.existsSync(gus) ? fs.readFileSync(gus, "utf8") : "";
   fs.writeFileSync(gus, applyDedicatedServerName(ini, guid));

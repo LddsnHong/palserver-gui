@@ -310,14 +310,16 @@ export async function getStats(rec: InstanceRecord): Promise<InstanceStats | nul
   const cpuDelta = stats.cpu_stats.cpu_usage.total_usage - stats.precpu_stats.cpu_usage.total_usage;
   const sysDelta = stats.cpu_stats.system_cpu_usage - stats.precpu_stats.system_cpu_usage;
   const cpuCount = stats.cpu_stats.online_cpus || 1;
-  // per-thread:percpu_usage[i] 是容器在邏輯處理器 i 的累計 jiffies;與 precpu 差分後
-  // 除以全系統差分 = 該執行緒佔全系統的比例(0–100%)。不乘 cpuCount(否則破百)。
+  // per-thread:percpu_usage[i] 是容器在邏輯處理器 i 的累計 jiffies;與 precpu 差分後除以
+  // 「單核時間」(= 全系統差分 sysDelta ÷ 核心數)= 該核心 0–100% 使用率。等同 (delta/sysDelta)×cpuCount。
+  // 這裡要 ×cpuCount(與 native/k8s 的 per-core「單核基準」語意一致);aggregate 的 cpuPercent 代表
+  // 佔總算力才不乘。percpu_usage 在某些核心版本會補到 possible/offline CPU 數,故截到 online 核心數。
   const percpu = stats.cpu_stats.cpu_usage.percpu_usage;
   const prePercpu = stats.precpu_stats.cpu_usage.percpu_usage;
   const perCore: (number | null)[] | null = percpu && prePercpu && sysDelta > 0
-    ? percpu.map((v, i) => {
+    ? percpu.slice(0, cpuCount).map((v, i) => {
         const delta = v - (prePercpu[i] ?? 0);
-        return Math.max(0, Math.min((delta / sysDelta) * 100, 100));
+        return Math.max(0, Math.min((delta / sysDelta) * cpuCount * 100, 100));
       })
     : null;
   return {
