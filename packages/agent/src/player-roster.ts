@@ -65,10 +65,14 @@ function mergePlayer(player: PdPlayerSummary, previous?: KnownPlayer): KnownPlay
 /**
  * Merge PalDefender's save-backed roster with the agent's presence history.
  *
- * PalDefender documents UserId as optional for offline save entries. Those
- * entries cannot be keyed directly, so use a unique player name as a guarded
- * fallback. Ambiguous or unknown nameless-ID entries are omitted because a
- * KnownPlayer without a UserId cannot be targeted by any player action.
+ * Every PalDefender entry (online or offline) is shown at least once — dropping
+ * one would make offline players vanish from the roster (the whole point of the
+ * PalDefender 1.8+ save-backed list). Deduplication only happens when an entry
+ * can be tied to exactly one agent-history record (an exact/compatible ID, or a
+ * unique name for ID-less save entries); that record's history is then inherited
+ * and consumed. Ambiguous matches keep the PalDefender entry on its own rather
+ * than guessing. ID-less entries that match nothing are shown without a UserId
+ * (visible in the roster, just not targetable by kick/ban).
  */
 export function mergeKnownPlayers(
   ownPlayers: KnownPlayer[],
@@ -82,9 +86,10 @@ export function mergeKnownPlayers(
     const identity = playerIdentity(player.userId);
     if (!identity.exact || matchingIndices(merged, identity, player.name).length) continue;
     const previousMatches = matchingIndices(remaining, identity, player.name);
-    // A bare numeric ID can match multiple platforms. Do not guess or add a
-    // third representation when the platform cannot be determined safely.
-    if (previousMatches.length > 1) continue;
+    // Inherit an agent record only when the match is unambiguous. A bare numeric
+    // ID can match multiple platforms — don't guess which; keep the PalDefender
+    // entry on its own id instead, but still show it (dropping = the player
+    // disappears from the roster).
     const previous = previousMatches.length === 1
       ? remaining.splice(previousMatches[0], 1)[0]
       : undefined;
@@ -99,24 +104,33 @@ export function mergeKnownPlayers(
 
   for (const player of missingId) {
     const name = nameKey(player.name);
-    if (!name || pdNameCounts.get(name) !== 1) continue;
-    const matches = remaining
-      .map((candidate, index) => ({ candidate, index }))
-      .filter(({ candidate }) => nameKey(candidate.name) === name);
-    if (matches.length !== 1) continue;
-    const [{ candidate, index }] = matches;
-    const identity = playerIdentity(candidate.userId);
-    if (!identity.exact || matchingIndices(merged, identity, candidate.name).length) continue;
-    remaining.splice(index, 1);
-    merged.push(mergePlayer(player, candidate));
+    // Inherit an agent record's id/history only when a unique name pins down a
+    // single agent record; otherwise show the entry with no UserId (visible,
+    // just not targetable). Never drop it — that is what hid offline players.
+    let previous: KnownPlayer | undefined;
+    if (name && pdNameCounts.get(name) === 1) {
+      const matches = remaining
+        .map((candidate, index) => ({ candidate, index }))
+        .filter(({ candidate }) => nameKey(candidate.name) === name);
+      if (matches.length === 1) {
+        const { candidate, index } = matches[0];
+        const identity = playerIdentity(candidate.userId);
+        if (identity.exact && !matchingIndices(merged, identity, candidate.name).length) {
+          previous = remaining.splice(index, 1)[0];
+        }
+      }
+    }
+    merged.push(mergePlayer(player, previous));
   }
 
-  const seenExactIds = new Set(merged.map((player) => playerIdentity(player.userId).exact));
+  const seenExactIds = new Set(
+    merged.map((player) => playerIdentity(player.userId).exact).filter(Boolean),
+  );
   for (const player of remaining) {
     const id = playerIdentity(player.userId).exact;
-    if (!id || seenExactIds.has(id)) continue;
+    if (id && seenExactIds.has(id)) continue;
     merged.push(player);
-    seenExactIds.add(id);
+    if (id) seenExactIds.add(id);
   }
   return merged;
 }

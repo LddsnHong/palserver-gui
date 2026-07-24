@@ -76,7 +76,7 @@ test("mergeKnownPlayers matches GDK and PS5 IDs with and without platform prefix
   assert.deepEqual(result.map((player) => player.sessions), [5, 7]);
 });
 
-test("mergeKnownPlayers keeps different platforms separate when numeric IDs coincide", () => {
+test("mergeKnownPlayers keeps an ambiguous bare-numeric entry on its own id (still shown)", () => {
   const result = mergeKnownPlayers(
     [
       known({ userId: "gdk_1234567890123456", name: "Xbox player" }),
@@ -85,23 +85,28 @@ test("mergeKnownPlayers keeps different platforms separate when numeric IDs coin
     [pd({ userId: "1234567890123456", name: "Unknown platform" })],
   );
 
-  assert.equal(result.length, 2);
-  assert.deepEqual(result.map((player) => player.userId), [
+  // 裸數字對到兩個平台 → 不猜繼承哪個,但仍以自身 id 顯示(不丟棄,否則離線玩家會消失)。
+  assert.equal(result.length, 3);
+  assert.deepEqual(result.map((player) => player.userId).sort(), [
+    "1234567890123456",
     "gdk_1234567890123456",
     "ps5_1234567890123456",
   ]);
 });
 
-test("mergeKnownPlayers omits unidentifiable PalDefender-only entries", () => {
+test("mergeKnownPlayers shows ID-less PalDefender-only entries (visible, not targetable)", () => {
   const result = mergeKnownPlayers(
     [known({ userId: "steam_76561198000000001", name: "Alice" })],
     [pd({ userId: "", name: "Unknown" })],
   );
 
-  assert.deepEqual(result.map((player) => player.name), ["Alice"]);
+  // 無 id、對不到 own 的離線玩家仍要顯示(舊版行為),只是不可 kick/ban。
+  assert.equal(result.length, 2);
+  assert.deepEqual(result.map((player) => player.name).sort(), ["Alice", "Unknown"]);
+  assert.equal(result.find((player) => player.name === "Unknown")?.userId, "");
 });
 
-test("mergeKnownPlayers does not guess when names are ambiguous", () => {
+test("mergeKnownPlayers does not guess an owner for an ambiguous name but still shows the entry", () => {
   const result = mergeKnownPlayers(
     [
       known({ userId: "steam_76561198000000001", name: "Same name" }),
@@ -110,6 +115,25 @@ test("mergeKnownPlayers does not guess when names are ambiguous", () => {
     [pd({ userId: "", name: "Same name", guildName: "Guild" })],
   );
 
-  assert.equal(result.length, 2);
-  assert.equal(result.every((player) => player.guildName === undefined), true);
+  // own 有兩個同名 → 不亂繼承任一個(兩筆 own 的 guildName 保持 undefined),
+  // 但 PalDefender 那筆仍以自身無 id 形式顯示(帶自己的 Guild)。
+  assert.equal(result.length, 3);
+  assert.equal(result.filter((player) => player.userId === "" && player.guildName === "Guild").length, 1);
+  assert.equal(result.filter((player) => player.userId !== "" && player.guildName === undefined).length, 2);
+});
+
+test("mergeKnownPlayers shows offline PalDefender players the agent never recorded", () => {
+  // Bug 回歸守門(#60):agent 沒在線看過的離線玩家(own 空),PalDefender 存檔有一批,
+  // 不管 UserId 是 steam_ / 裸數字 / 空,都必須顯示,不能消失。
+  const result = mergeKnownPlayers(
+    [],
+    [
+      pd({ userId: "steam_76561198000000009", name: "Offline A" }),
+      pd({ userId: "1234567890", name: "Offline B" }),
+      pd({ userId: "", name: "Offline C" }),
+    ],
+  );
+
+  assert.equal(result.length, 3);
+  assert.deepEqual(result.map((player) => player.name).sort(), ["Offline A", "Offline B", "Offline C"]);
 });
