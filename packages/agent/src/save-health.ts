@@ -49,6 +49,9 @@ export interface AnalyzeOptions {
   /** 物品容器 id(純 hex 小寫)→ 誰的哪一格(背包/裝備/…)。
    *  掃描時會把這些容器的內容收進玩家快照的 inventory。 */
   itemContainerOwners?: Map<string, { uid: string; kind: InventoryKind }>;
+  /** 玩家 uid(純 hex 小寫)→ 其 Players/<uid>.sav 檔案 mtimeMs(最後上線現實時間)。
+   *  last_online_real_time 基準在本環境不適用(見 G2),改以此算離線天數。 */
+  playerSavMtimes?: Map<string, number>;
 }
 
 /** GUID 正規化成純 hex 小寫(容器 id 比對用)。 */
@@ -67,6 +70,14 @@ const TICKS_PER_DAY = 864_000_000_000;
 const MAX_PLAUSIBLE_DAYS = 3650;
 
 const INACTIVE_DAYS = 30;
+
+/** 由 player .sav 檔案 mtime 算離線天數(現實時間基準,與 Date.now() 一致)。uid 純 hex 小寫比對。 */
+const daysAgoFromSav = (uid: string, savMtimes?: Map<string, number>): number | null => {
+  const m = savMtimes?.get(normGuid(uid));
+  if (!m) return null;
+  const d = Math.floor((Date.now() - m) / 86_400_000);
+  return d >= 0 && d <= MAX_PLAUSIBLE_DAYS ? d : null;
+};
 const MAX_INACTIVE_ROWS = 100;
 const MAX_EMPTY_GUILD_NAMES = 50;
 /** 單一物品清單(背包/裝備/…)保留的品項上限。 */
@@ -708,8 +719,8 @@ class Analyzer {
     for (const uid of uids) {
       const ch = this.playerChars.get(uid);
       const roster = this.playersSeen.get(uid);
-      let days: number | null = null;
-      if (roster && roster.ticks > 0) {
+      let days = daysAgoFromSav(uid, this.opts.playerSavMtimes);
+      if (days === null && roster && roster.ticks > 0) {
         const d = (nowTicks - roster.ticks) / TICKS_PER_DAY;
         if (d >= 0 && d <= MAX_PLAUSIBLE_DAYS) days = Math.floor(d);
       }
@@ -784,8 +795,8 @@ class Analyzer {
         baseCampLevel: g.baseCampLevel,
         members: g.memberUids.map((uid) => {
           const r = rosterByUid.get(uid);
-          let d: number | null = null;
-          if (r && r.ticks > 0) {
+          let d = daysAgoFromSav(uid, this.opts.playerSavMtimes);
+          if (d === null && r && r.ticks > 0) {
             const dd = (nowTicks - r.ticks) / TICKS_PER_DAY;
             if (dd >= 0 && dd <= MAX_PLAUSIBLE_DAYS) d = Math.floor(dd);
           }
