@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import {
   COMMANDS,
@@ -2080,7 +2081,7 @@ export function registerRoutes(
   const webhookInput = z.object({
     url: z.string().url(),
     events: z.array(z.string().min(1)).min(1),
-    format: z.enum(["generic", "discord", "feishu", "slack"]).optional(),
+    format: z.enum(["generic", "discord", "feishu", "slack", "wecom", "dingtalk", "googlechat"]).optional(),
     label: z.string().max(80).optional(),
     enabled: z.boolean().optional(),
   });

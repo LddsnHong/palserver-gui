@@ -162,7 +162,14 @@ export interface WebhookEnvelope<T = unknown> {
 
 // ── Webhook 設定 ────────────────────────────────────────────────────────
 
-export type WebhookFormat = "generic" | "discord" | "feishu" | "slack";
+export type WebhookFormat =
+  | "generic"
+  | "discord"
+  | "feishu"
+  | "slack"
+  | "wecom"
+  | "dingtalk"
+  | "googlechat";
 
 export interface WebhookConfig {
   id: string;
@@ -401,18 +408,34 @@ function eventSummary(env: WebhookEnvelope, lang: BotLang): { title: string; des
   return build ? build(d, lang) : { title: env.type, description: "" };
 }
 
-/** 把事件信封轉成飞书(Lark)自訂機器人的文字訊息 payload。飞书只吃 {msg_type, content},
- *  送 generic/discord 格式它會回 HTTP 200 但 code≠0 靜默丟棄(見 issue #58)。 */
+/** 事件 → 純文字一段(飞书 / 企業微信 / 钉钉 / Google Chat 等純文字 webhook 共用)。 */
+function plainSummary(env: WebhookEnvelope, lang: BotLang): string {
+  const s = eventSummary(env, lang);
+  return [`[${env.instance.name}] ${s.title}`, s.description].filter(Boolean).join("\n");
+}
+
+/** 飞书(Lark)自訂機器人文字訊息。飞书只吃 {msg_type, content},送別的格式會回 HTTP 200 但 code≠0 靜默丟棄(issue #58)。 */
 export function toFeishuPayload(
   env: WebhookEnvelope,
   lang: BotLang = "zh-TW",
 ): { msg_type: "text"; content: { text: string } } {
-  const s = eventSummary(env, lang);
-  const text = [`[${env.instance.name}] ${s.title}`, s.description].filter(Boolean).join("\n");
-  return { msg_type: "text", content: { text } };
+  return { msg_type: "text", content: { text: plainSummary(env, lang) } };
 }
 
-/** 把事件信封轉成 Slack incoming webhook 的文字訊息 payload({text},支援 mrkdwn)。 */
+/** 企業微信(WeCom)/ 钉钉(DingTalk)自訂機器人文字訊息 —— 兩者同 shape:{msgtype:"text", text:{content}}。 */
+export function toMsgTypeTextPayload(
+  env: WebhookEnvelope,
+  lang: BotLang = "zh-TW",
+): { msgtype: "text"; text: { content: string } } {
+  return { msgtype: "text", text: { content: plainSummary(env, lang) } };
+}
+
+/** Google Chat incoming webhook 文字訊息({text})。 */
+export function toGoogleChatPayload(env: WebhookEnvelope, lang: BotLang = "zh-TW"): { text: string } {
+  return { text: plainSummary(env, lang) };
+}
+
+/** Slack incoming webhook 文字訊息({text},mrkdwn);Mattermost / Rocket.Chat 也相容此格式。 */
 export function toSlackPayload(env: WebhookEnvelope, lang: BotLang = "zh-TW"): { text: string } {
   const s = eventSummary(env, lang);
   const text = [`*${s.title}*`, s.description, `_${env.instance.name}_`].filter(Boolean).join("\n");

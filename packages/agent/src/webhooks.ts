@@ -8,6 +8,8 @@ import {
   toDiscordPayload,
   toFeishuPayload,
   toSlackPayload,
+  toMsgTypeTextPayload,
+  toGoogleChatPayload,
   type WebhookConfig,
   type WebhookConfigPublic,
   type WebhookEnvelope,
@@ -137,9 +139,32 @@ function payloadFor(wh: StoredWebhook, env: WebhookEnvelope): string {
       return JSON.stringify(toFeishuPayload(env));
     case "slack":
       return JSON.stringify(toSlackPayload(env));
+    case "wecom":
+    case "dingtalk":
+      return JSON.stringify(toMsgTypeTextPayload(env));
+    case "googlechat":
+      return JSON.stringify(toGoogleChatPayload(env));
     default:
       return JSON.stringify(env);
   }
+}
+
+/** 飞书 / 企業微信 / 钉钉 即使拒收也回 HTTP 200,真正結果在 body 的 code 欄位(成功 = 0)。
+ *  只看 HTTP 狀態會把「格式不符、其實沒送出」誤判成功(issue #58)。回傳錯誤字串或 null。 */
+function bodyRejection(format: WebhookFormat, data: unknown): string | null {
+  if (format !== "feishu" && format !== "wecom" && format !== "dingtalk") return null;
+  const d = (data ?? {}) as {
+    code?: number;
+    StatusCode?: number;
+    errcode?: number;
+    msg?: string;
+    errmsg?: string;
+    StatusMessage?: string;
+  };
+  const code = format === "feishu" ? d.code ?? d.StatusCode : d.errcode;
+  if (typeof code !== "number" || code === 0) return null;
+  const msg = d.errmsg ?? d.msg ?? d.StatusMessage ?? "";
+  return `${format} 拒收(code ${code}${msg ? `: ${msg}` : ""})`.slice(0, 160);
 }
 
 async function deliver(wh: StoredWebhook, env: WebhookEnvelope, agentVersion: string): Promise<DeliverResult> {
@@ -156,17 +181,11 @@ async function deliver(wh: StoredWebhook, env: WebhookEnvelope, agentVersion: st
       body,
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
-    // 飞书即使 body 不合法也回 HTTP 200,真正結果在回應的 code 欄位(成功 = 0)。不看它會把
-    // 「格式不符、訊息其實沒送出」誤判成功(issue #58)。Slack 失敗會直接回非 2xx,res.ok 已足夠。
-    if (wh.format === "feishu" && res.ok) {
-      const data = (await res.json().catch(() => null)) as
-        | { code?: number; StatusCode?: number; msg?: string; StatusMessage?: string }
-        | null;
-      const code = data?.code ?? data?.StatusCode;
-      if (code !== undefined && code !== 0) {
-        const msg = data?.msg ?? data?.StatusMessage ?? "";
-        return { ok: false, status: res.status, error: `飞书拒收(code ${code}${msg ? `: ${msg}` : ""})`.slice(0, 160) };
-      }
+    // 飞书/企業微信/钉钉:HTTP 200 不代表送達,要看 body 的 code(見 issue #58)。
+    // Slack/Google Chat 失敗會直接回非 2xx,res.ok 已足夠。
+    if (res.ok && (wh.format === "feishu" || wh.format === "wecom" || wh.format === "dingtalk")) {
+      const rejected = bodyRejection(wh.format, await res.json().catch(() => null));
+      if (rejected) return { ok: false, status: res.status, error: rejected };
     }
     return { ok: res.ok, status: res.status };
   } catch (e) {

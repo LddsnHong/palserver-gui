@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { toFeishuPayload, toSlackPayload, toDiscordPayload } from "./index.js";
+import { toFeishuPayload, toSlackPayload, toDiscordPayload, toMsgTypeTextPayload, toGoogleChatPayload } from "./index.js";
 import type { WebhookEnvelope } from "./index.js";
 
 // issue #58:飞书/Slack 需要各自的訊息格式,送 generic/discord body 會被靜默丟棄。
@@ -28,6 +28,19 @@ test("toSlackPayload:Slack {text} shape 正確,帶伺服器名與事件摘要", 
   assert.equal(typeof p.text, "string");
   assert.ok(p.text.includes("我的伺服器"), "應含伺服器名");
   assert.ok(p.text.length > "_我的伺服器_".length, "應含事件摘要文字");
+});
+
+test("toMsgTypeTextPayload:企業微信 / 钉钉 shape 正確(msgtype/text.content),帶伺服器名", () => {
+  const p = toMsgTypeTextPayload(env);
+  assert.equal(p.msgtype, "text");
+  assert.equal(typeof p.text.content, "string");
+  assert.ok(p.text.content.includes("我的伺服器"), "應含伺服器名");
+});
+
+test("toGoogleChatPayload:Google Chat {text} shape 正確,帶伺服器名", () => {
+  const p = toGoogleChatPayload(env);
+  assert.equal(typeof p.text, "string");
+  assert.ok(p.text.includes("我的伺服器"), "應含伺服器名");
 });
 
 test("toDiscordPayload:重構共用 eventSummary 後仍產出單一 embed(regression)", () => {

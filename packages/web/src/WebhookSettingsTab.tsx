@@ -58,6 +58,12 @@ function formatLabel(f: WebhookFormat): string {
       return t("飞书 / Lark(自訂機器人)");
     case "slack":
       return t("Slack(Incoming Webhook)");
+    case "wecom":
+      return t("企業微信(群機器人)");
+    case "dingtalk":
+      return t("钉钉(自訂機器人)");
+    case "googlechat":
+      return t("Google Chat(Incoming Webhook)");
     default:
       return t("自訂端點(HMAC 簽章)");
   }
@@ -73,7 +79,13 @@ function formatHelp(f: WebhookFormat): string {
         "以飞书(Lark)自訂機器人的文字訊息格式發送,貼上群組自訂機器人的 Webhook 網址。機器人安全設定請用「自訂關鍵詞」(並確保訊息含該詞)或「IP 白名單」;目前尚未支援「簽章校驗」模式。",
       );
     case "slack":
-      return t("以 Slack Incoming Webhook 的文字訊息格式發送,貼上 Slack App 的 Incoming Webhook 網址即可。");
+      return t("以 Slack Incoming Webhook 的文字訊息格式發送,貼上 Slack App 的 Incoming Webhook 網址即可(Mattermost、Rocket.Chat 也相容)。");
+    case "wecom":
+      return t("以企業微信群機器人的文字訊息格式發送,貼上群機器人的 Webhook 網址(qyapi.weixin.qq.com/…?key=…)即可。");
+    case "dingtalk":
+      return t("以钉钉自訂機器人的文字訊息格式發送,貼上機器人的 Webhook 網址。安全設定請用「自訂關鍵詞」(訊息需含該詞)或「IP 白名單」;暫不支援「加簽」模式。");
+    case "googlechat":
+      return t("以 Google Chat Incoming Webhook 的文字訊息格式發送,貼上聊天室 Webhook 網址(chat.googleapis.com/…)即可。");
     default:
       return t("以 JSON 格式 POST 到你的伺服器,並附上 HMAC-SHA256 簽章(X-Palserver-Signature)供你驗證來源。");
   }
@@ -598,6 +610,9 @@ function WebhookForm({
           <option value="discord">{t("Discord(Incoming Webhook)")}</option>
           <option value="feishu">{t("飞书 / Lark(自訂機器人)")}</option>
           <option value="slack">{t("Slack(Incoming Webhook)")}</option>
+          <option value="wecom">{t("企業微信(群機器人)")}</option>
+          <option value="dingtalk">{t("钉钉(自訂機器人)")}</option>
+          <option value="googlechat">{t("Google Chat(Incoming Webhook)")}</option>
         </Select>
         <span className="text-[11px] font-normal text-ink-muted">{formatHelp(draft.format)}</span>
       </label>
