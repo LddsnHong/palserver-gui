@@ -435,7 +435,7 @@ function KnownPlayersCard({
         <div className="flex flex-col divide-y divide-line">
           {offline.map((p) => {
             const hasHistory = !!p.firstSeen; // agent 記錄過(PalDefender-only 玩家沒有)
-            const sav = saveByUid?.get(normUid(p.userId));
+            const sav = saveByUid?.get(normUid(p.playerUid ?? p.userId));
             const days = sav?.lastOnlineDaysAgo;
             const lastOnline =
               days != null

@@ -568,6 +568,8 @@ export interface KnownPlayer {
   sessions: number;
   playtimeSeconds: number;
   lastLevel: number;
+  /** Palworld PlayerUID(GUID);與存檔掃描 SavePlayerProfile.uid 同基準,用於 JOIN 離線上線時間。 */
+  playerUid?: string;
   /** 公會名(僅 PalDefender 名冊有;agent 自記錄的沒有)。 */
   guildName?: string;
 }

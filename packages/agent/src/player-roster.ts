@@ -58,6 +58,7 @@ function mergePlayer(player: PdPlayerSummary, previous?: KnownPlayer): KnownPlay
     sessions: previous?.sessions ?? 0,
     playtimeSeconds: previous?.playtimeSeconds ?? 0,
     lastLevel: previous?.lastLevel ?? 0,
+    ...(player.playerUid.trim() ? { playerUid: player.playerUid.trim() } : {}),
     ...(player.guildName.trim() ? { guildName: player.guildName.trim() } : {}),
   };
 }
