@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { FiChevronRight, FiHome, FiRefreshCw } from "react-icons/fi";
+import { FiAlertTriangle, FiChevronRight, FiHome, FiRefreshCw } from "react-icons/fi";
 import type { SaveGuild } from "@palserver/shared";
 import type { AgentClient } from "./api";
 import { GuildDetailModal, researchName } from "./GuildDetailModal";
 import { useGameData } from "./gameData";
 import { t, useI18n } from "./i18n";
-import { EmptyState, btnGhost, card, errorCls } from "./ui";
+import { EmptyState, btnGhost, card, errorCls, inputCls } from "./ui";
 
 /**
  * 公會分頁 — 存檔快照(save-tools 掃描)驅動的公會總覽。
@@ -33,6 +33,19 @@ export function GuildsTab({
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [detailFor, setDetailFor] = useState<SaveGuild | null>(null);
+  // 荒廢篩選:管理員輸入天數,標出「任一成員超過該天數未上線」的公會,引導安全刪除荒廢據點。
+  const [staleDays, setStaleDays] = useState<number | "">("");
+  const staleThreshold = staleDays === "" ? null : Math.max(1, staleDays);
+  // 無人公會:沒有任何成員在 X 日內上線(且有成員、有據點)。X 為空時不篩。
+  const isGhostGuild = (g: SaveGuild): boolean => {
+    if (staleThreshold === null || g.members.length === 0 || g.bases.length === 0) return false;
+    return !g.members.some((m) => m.lastOnlineDaysAgo != null && m.lastOnlineDaysAgo < staleThreshold);
+  };
+  // 活躍度:公會最近上線成員的 daysAgo(小=活躍);無資料視為最不活躍(Infinity→排底)。
+  const latestActiveDaysAgo = (g: SaveGuild): number => {
+    const days = g.members.map((m) => m.lastOnlineDaysAgo).filter((d): d is number => d != null);
+    return days.length ? Math.min(...days) : Number.POSITIVE_INFINITY;
+  };
 
   const load = useCallback(async () => {
     try {
@@ -86,7 +99,11 @@ export function GuildsTab({
     }
   };
 
-  const sorted = [...(guilds ?? [])].sort((a, b) => b.members.length - a.members.length);
+  const sorted = [...(guilds ?? [])].sort((a, b) => {
+    const baseDiff = b.bases.length - a.bases.length; // 主鍵:據點數降序(多據點=活躍,在上)
+    if (baseDiff !== 0) return baseDiff;
+    return latestActiveDaysAgo(a) - latestActiveDaysAgo(b); // 次鍵:活躍(小)在上
+  });
 
   return (
     <div className="flex flex-col gap-4">
@@ -100,6 +117,23 @@ export function GuildsTab({
               ? "" // 無法取得快照時只顯示下方的提示框,不重複「尚未掃描」
               : t("尚未掃描過存檔。點「從存檔刷新」建立快照。")}
         </p>
+        {sorted.length > 0 && (
+          <label className="inline-flex items-center gap-1.5 text-xs text-ink-muted">
+            <FiAlertTriangle className="size-3.5 shrink-0 text-amber-500" />
+            {t("無人公會:標出")}
+            <input
+              type="number"
+              min={1}
+              value={staleDays}
+              onChange={(e) =>
+                setStaleDays(e.target.value === "" ? "" : Math.max(1, Number(e.target.value)))
+              }
+              placeholder="30"
+              className={`${inputCls} w-20 px-2 py-1`}
+            />
+            {t("日內無任何公會成員上線")}
+          </label>
+        )}
         {canScan && (
           <button
             className={`${btnGhost} inline-flex items-center gap-1.5`}
@@ -122,15 +156,21 @@ export function GuildsTab({
         </EmptyState>
       )}
 
-      {sorted.map((g) => (
+      {sorted.map((g) => {
+        const isStale = isGhostGuild(g);
+        return (
         <button
           key={g.id}
-          className={`${card} flex w-full flex-wrap items-center justify-between gap-3 text-left transition hover:border-pal/50`}
+          className={`${card} flex w-full flex-wrap items-center justify-between gap-3 text-left transition hover:border-pal/50 ${isStale ? "!border-red-500/70 bg-red-500/5" : ""}`}
           onClick={() => setDetailFor(g)}
         >
           <div className="min-w-0">
             <p className="flex items-center gap-2 text-sm font-extrabold">
-              <FiHome className="size-4 shrink-0 text-pal" />
+              {isStale ? (
+                <FiAlertTriangle className="size-4 shrink-0 text-red-500" />
+              ) : (
+                <FiHome className="size-4 shrink-0 text-pal" />
+              )}
               <span className="truncate">{g.name}</span>
               {g.baseCampLevel !== null && (
                 <span className="rounded-full bg-card-soft px-2 py-0.5 text-xs font-bold text-ink-muted">
@@ -140,6 +180,9 @@ export function GuildsTab({
             </p>
             <p className="mt-1 text-[13px] text-ink-muted">
               {t("{n} 名成員", { n: g.members.length })} · {t("{n} 個據點", { n: g.bases.length })}
+              {isStale && (
+                <> · <span className="font-bold text-red-500">{t("無人公會")}</span></>
+              )}
               {g.storage !== null && <> · {t("倉庫 {n} 種物品", { n: g.storage.length })}</>}
               {g.research?.currentId && (
                 <> · {t("研究中:{id}", { id: researchName(gameData, g.research.currentId) })}</>
@@ -148,7 +191,8 @@ export function GuildsTab({
           </div>
           <FiChevronRight className="size-4 shrink-0 text-ink-muted" />
         </button>
-      ))}
+        );
+      })}
 
       {detailFor && (
         <GuildDetailModal

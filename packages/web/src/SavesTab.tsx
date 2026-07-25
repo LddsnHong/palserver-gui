@@ -27,7 +27,7 @@ import type { AgentClient } from "./api";
 import { FileBrowserDialog } from "./FileManager";
 import { HostFixModal } from "./HostFixModal";
 import { t, useI18n } from "./i18n";
-import { EmptyState, btn, btnGhost, card, errorCls, inputCls } from "./ui";
+import { EmptyState, btn, btnGhost, card, errorCls, fmtLastOnline, inputCls } from "./ui";
 
 /** Where a world's .sav files live, relative to the server directory. */
 const worldPath = (guid: string) => `Pal/Saved/SaveGames/0/${guid}`;
@@ -452,7 +452,7 @@ function HealthCard({
                   <div key={p.uid} className="flex flex-wrap items-center gap-x-3 px-3 py-1.5 text-[13px]">
                     <span className="min-w-28 font-bold">{p.name}</span>
                     <span className="flex-1 text-xs text-ink-muted">{p.guildName}</span>
-                    <span className="text-xs font-bold text-sun">{t("{n} 天前", { n: p.lastOnlineDaysAgo ?? "?" })}</span>
+                    <span className="text-xs font-bold text-sun">{fmtLastOnline(p.lastOnlineDaysAgo)}</span>
                   </div>
                 ))}
               </div>

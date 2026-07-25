@@ -684,10 +684,9 @@ class Analyzer {
   /** 串流讀完後,把名冊換算成離線天數並排序。 */
   finish(levelSavMtimeMs: number): LevelJsonAnalysis {
     const mtimeTicks = levelSavMtimeMs * 10_000 + EPOCH_TICKS;
-    // 存檔內世界時鐘須通過合理性檢查(與 mtime 差距一年內)才採用,否則退回 mtime
-    const rt = this.realDateTimeTicks;
-    const nowTicks =
-      rt !== null && Math.abs(rt - mtimeTicks) <= 365 * TICKS_PER_DAY ? rt : mtimeTicks;
+    // 存檔內世界時鐘(RealDateTimeTicks)與 last_online_real_time 同基準(伺服器運行 ticks),
+    // 直接作「現在」;僅欄位缺失時退回 mtime。勿用 abs(rt-mtime) 檢查(兩者基準不同)。
+    const nowTicks = this.realDateTimeTicks ?? mtimeTicks;
     const rows: SaveHealthPlayerRow[] = [];
     for (const [uid, p] of this.playersSeen) {
       let days: number | null = null;
