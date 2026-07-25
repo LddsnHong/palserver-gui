@@ -157,7 +157,7 @@ export function GuildsTab({
 
       {sorted.map((g) => {
         const stale = staleMembersOf(g);
-        const isStale = stale.length > 0;
+        const isStale = stale.length > 0 && g.bases.length > 0;
         return (
         <button
           key={g.id}
