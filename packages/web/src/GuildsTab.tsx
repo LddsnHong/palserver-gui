@@ -36,10 +36,11 @@ export function GuildsTab({
   // 荒廢篩選:管理員輸入天數,標出「任一成員超過該天數未上線」的公會,引導安全刪除荒廢據點。
   const [staleDays, setStaleDays] = useState<number | "">("");
   const staleThreshold = staleDays === "" ? null : Math.max(1, staleDays);
-  const staleMembersOf = (g: SaveGuild) =>
-    staleThreshold === null
-      ? []
-      : g.members.filter((m) => m.lastOnlineDaysAgo != null && m.lastOnlineDaysAgo >= staleThreshold);
+  // 無人公會:沒有任何成員在 X 日內上線(且有成員、有據點)。X 為空時不篩。
+  const isGhostGuild = (g: SaveGuild): boolean => {
+    if (staleThreshold === null || g.members.length === 0 || g.bases.length === 0) return false;
+    return !g.members.some((m) => m.lastOnlineDaysAgo != null && m.lastOnlineDaysAgo < staleThreshold);
+  };
   // 活躍度:公會最近上線成員的 daysAgo(小=活躍);無資料視為最不活躍(Infinity→排底)。
   const latestActiveDaysAgo = (g: SaveGuild): number => {
     const days = g.members.map((m) => m.lastOnlineDaysAgo).filter((d): d is number => d != null);
@@ -119,7 +120,7 @@ export function GuildsTab({
         {sorted.length > 0 && (
           <label className="inline-flex items-center gap-1.5 text-xs text-ink-muted">
             <FiAlertTriangle className="size-3.5 shrink-0 text-amber-500" />
-            {t("荒廢公會篩選:標出有成員超過")}
+            {t("無人公會:標出")}
             <input
               type="number"
               min={1}
@@ -130,7 +131,7 @@ export function GuildsTab({
               placeholder="30"
               className={`${inputCls} w-20 px-2 py-1`}
             />
-            {t("日未上線")}
+            {t("日內無任何公會成員上線")}
           </label>
         )}
         {canScan && (
@@ -156,8 +157,7 @@ export function GuildsTab({
       )}
 
       {sorted.map((g) => {
-        const stale = staleMembersOf(g);
-        const isStale = stale.length > 0 && g.bases.length > 0;
+        const isStale = isGhostGuild(g);
         return (
         <button
           key={g.id}
@@ -181,7 +181,7 @@ export function GuildsTab({
             <p className="mt-1 text-[13px] text-ink-muted">
               {t("{n} 名成員", { n: g.members.length })} · {t("{n} 個據點", { n: g.bases.length })}
               {isStale && (
-                <> · <span className="font-bold text-red-500">{t("{n} 名成員 {x} 日未上線", { n: stale.length, x: staleThreshold ?? 0 })}</span></>
+                <> · <span className="font-bold text-red-500">{t("無人公會")}</span></>
               )}
               {g.storage !== null && <> · {t("倉庫 {n} 種物品", { n: g.storage.length })}</>}
               {g.research?.currentId && (
