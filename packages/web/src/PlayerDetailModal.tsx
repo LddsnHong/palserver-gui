@@ -15,7 +15,7 @@ import type { AgentClient } from "./api";
 import { useGameData, displayName, findCharacter, itemIconUrl, type GameData } from "./gameData";
 import { maskSteamId } from "./SteamId";
 import { localizeBaseName, t, useI18n } from "./i18n";
-import { DetailsToggle, Overlay, SponsorHint, card, btn, btnGhost, errorCls, inputCls, useDetailsPref } from "./ui";
+import { DetailsToggle, Overlay, SponsorHint, card, btn, btnGhost, errorCls, fmtLastOnline, inputCls, useDetailsPref } from "./ui";
 
 /**
  * 玩家詳情 — 兩個資料來源「合併成同一個視圖」,不分區:
@@ -317,9 +317,7 @@ function MergedBody({
   const lastOnline =
     profile?.lastOnlineDaysAgo === null || profile?.lastOnlineDaysAgo === undefined
       ? null
-      : profile.lastOnlineDaysAgo === 0
-        ? t("今天")
-        : t("{n} 天前", { n: profile.lastOnlineDaysAgo });
+      : fmtLastOnline(profile.lastOnlineDaysAgo);
 
   return (
     <div className="flex flex-col gap-4">

@@ -43,7 +43,7 @@ import {
 } from "@palserver/shared";
 import type { AgentClient } from "./api";
 import { t, useI18n } from "./i18n";
-import { EmptyState, btnGhost, card, errorCls } from "./ui";
+import { EmptyState, btnGhost, card, errorCls, fmtLastOnline } from "./ui";
 
 const fmtUptime = (seconds: number) => {
   const h = Math.floor(seconds / 3600);
@@ -105,9 +105,9 @@ export function PlayersTab({
     }
   }, [client, instanceId]);
 
-  const saveByUid = useMemo(() => {
+  const saveByName = useMemo(() => {
     const m = new Map<string, Omit<SavePlayerProfile, "pals">>();
-    for (const p of saveSnapshot?.players ?? []) m.set(normUid(p.uid), p);
+    for (const p of saveSnapshot?.players ?? []) if (p.name) m.set(p.name, p);
     return m;
   }, [saveSnapshot]);
   const bannedIds = new Set(moderation.bans.map((b) => b.userId).filter((x): x is string => !!x));
@@ -226,7 +226,7 @@ export function PlayersTab({
         <EmptyState icon={<FiUsers />} title={t("目前無法連線到伺服器的 REST API")}>{live.reason}</EmptyState>
         <KnownPlayersCard
           known={known}
-          saveByUid={saveByUid}
+          saveByName={saveByName}
           gameData={gameData}
           client={client}
           instanceId={instanceId}
@@ -353,7 +353,7 @@ export function PlayersTab({
 
       <KnownPlayersCard
         known={known}
-        saveByUid={saveByUid}
+        saveByName={saveByName}
         gameData={gameData}
         client={client}
         instanceId={instanceId}
@@ -393,15 +393,13 @@ const fmtPlaytime = (seconds: number) => {
 };
 
 const fmtWhen = (iso: string) => (iso ? new Date(iso).toLocaleString() : "");
-/** uid 正規化(去符號小寫)用於 KnownPlayer.userId ↔ SavePlayerProfile.uid 比對。 */
-const normUid = (s: string) => s.replace(/[^0-9a-z]/gi, "").toLowerCase();
 
 /** 離線玩家名冊:在線玩家已經有獨立的「在線玩家」卡片,這裡只列離線的,不重複。
  * 名單來源:agent 有開 PalDefender REST 時走它的名冊(含存檔內所有離線玩家),否則用
  * agent 自己記錄的。有 agent 歷史(首見時間)的才顯示等級 / 遊玩時長等統計。 */
 function KnownPlayersCard({
   known,
-  saveByUid,
+  saveByName,
   gameData,
   client,
   instanceId,
@@ -411,7 +409,7 @@ function KnownPlayersCard({
   onUnban,
 }: {
   known: KnownPlayer[];
-  saveByUid?: Map<string, Omit<SavePlayerProfile, "pals">>;
+  saveByName?: Map<string, Omit<SavePlayerProfile, "pals">>;
   gameData: GameData | null;
   client: AgentClient;
   instanceId: string;
@@ -435,20 +433,13 @@ function KnownPlayersCard({
         <div className="flex flex-col divide-y divide-line">
           {offline.map((p) => {
             const hasHistory = !!p.firstSeen; // agent 記錄過(PalDefender-only 玩家沒有)
-            const sav = saveByUid?.get(normUid(p.playerUid ?? p.userId));
-            const days = sav?.lastOnlineDaysAgo;
-            const lastOnline =
-              days != null
-                ? days === 0
-                  ? t("今天")
-                  : t("{n} 天前", { n: days })
-                : p.lastSeen
-                  ? fmtWhen(p.lastSeen)
-                  : t("未知");
+            const sav = saveByName?.get(p.name);
+            const lvl = sav?.level ?? p.lastLevel;
+            const lastOnline = fmtLastOnline(sav?.lastOnlineDaysAgo, p.lastSeen) || t("未知");
             return (
               <div key={p.userId} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-5 py-3">
                 <button onClick={() => onOpen(p.userId, p.name)} title={t("查看帕魯與背包")} className="transition hover:opacity-80">
-                  <PlayerAvatar seed={p.userId} gameData={gameData} size={36} />
+                  <PlayerAvatar seed={p.userId || p.name} gameData={gameData} size={36} />
                 </button>
                 <div className="min-w-40 flex-1">
                   <p className="flex flex-wrap items-center gap-2 text-sm font-extrabold">
@@ -457,11 +448,10 @@ function KnownPlayersCard({
                     </button>
                     {p.guildName && <span className="text-xs font-normal text-ink-muted">· {p.guildName}</span>}
                   </p>
-                  {hasHistory && (
-                    <p className="text-xs text-ink-muted">
-                      Lv.{p.lastLevel} · {t("遊玩")} {fmtPlaytime(p.playtimeSeconds)} · {t("{n} 次連線", { n: p.sessions })}
-                    </p>
-                  )}
+                  <p className="text-xs text-ink-muted">
+                    Lv.{lvl}
+                    {hasHistory && ` · ${t("遊玩")} ${fmtPlaytime(p.playtimeSeconds)} · ${t("{n} 次連線", { n: p.sessions })}`}
+                  </p>
                   <p className="mt-0.5">
                     <SteamId userId={p.userId} />
                   </p>

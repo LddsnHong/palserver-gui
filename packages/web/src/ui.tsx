@@ -79,6 +79,17 @@ export const inputCls =
 export const labelCls = "flex flex-col gap-1.5 text-left text-[13px] font-bold text-ink-muted";
 export const errorCls = "rounded-xl bg-berry/10 px-3 py-2 text-[13px] font-bold text-berry";
 
+/** 上線時間統一顯示(絕對日期):SAV daysAgo 推算(整日精度)/ agent lastSeen / 空。荒廢篩選另用天數。 */
+export const fmtLastOnline = (
+  daysAgo: number | null | undefined,
+  lastSeen?: string,
+): string =>
+  daysAgo != null
+    ? new Date(Date.now() - daysAgo * 86_400_000).toLocaleString()
+    : lastSeen
+      ? new Date(lastSeen).toLocaleString()
+      : "";
+
 /** 下拉選單:隱藏各瀏覽器不一致的原生箭頭,改用自繪 chevron(和語言切換一致)。 */
 export function Select({
   value,
