@@ -419,7 +419,28 @@ function KnownPlayersCard({
   onBan?: (userId: string, name: string) => void;
   onUnban?: (userId: string, name: string) => void;
 }) {
-  const offline = known.filter((p) => !p.online);
+  const nk = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+  const knownNames = new Set(known.map((p) => nk(p.name)).filter(Boolean));
+  // #68 承諾「含 agent 未觀測的玩家」:存檔掃描有、但 known(在線 + agent 記錄)都沒有的玩家,
+  // 補成離線玩家。PalDefender 只回在線、且 agent 重啟會清空 presence 記錄,此時存檔是離線玩家的
+  // 唯一來源(userId 空 → 可見但不可 kick/ban)。
+  const offlineExtra: KnownPlayer[] = [];
+  for (const sav of saveByName?.values() ?? []) {
+    if (!sav.name || knownNames.has(nk(sav.name))) continue;
+    offlineExtra.push({
+      userId: "",
+      name: sav.name,
+      accountName: "",
+      online: false,
+      firstSeen: "",
+      lastSeen: "",
+      sessions: 0,
+      playtimeSeconds: 0,
+      lastLevel: sav.level ?? 0,
+      ...(sav.guildName ? { guildName: sav.guildName } : {}),
+    });
+  }
+  const offline = [...known.filter((p) => !p.online), ...offlineExtra];
   return (
     <div className={`${card} p-0`}>
       <h3 className="border-b-2 border-line px-5 py-3 text-sm font-extrabold text-ink-muted">
@@ -437,7 +458,7 @@ function KnownPlayersCard({
             const lvl = sav?.level ?? p.lastLevel;
             const lastOnline = fmtLastOnline(sav?.lastOnlineDaysAgo, p.lastSeen) || t("未知");
             return (
-              <div key={p.userId} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-5 py-3">
+              <div key={p.userId || p.name} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-5 py-3">
                 <button onClick={() => onOpen(p.userId, p.name)} title={t("查看帕魯與背包")} className="transition hover:opacity-80">
                   <PlayerAvatar seed={p.userId || p.name} gameData={gameData} size={36} />
                 </button>
