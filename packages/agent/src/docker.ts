@@ -10,6 +10,7 @@ import { mergeEnginePatch } from "./engine-ini-merge.js";
 import type { InstanceRecord } from "./store.js";
 import { configPlatformDir } from "./platform.js";
 import { diffIniAgainstSnapshot, renderPalWorldSettingsIni } from "./settings-ini.js";
+import { imageDigest, registryImageDigest } from "./image-digest.js";
 
 export const docker = new Docker(); // default: /var/run/docker.sock
 
@@ -460,8 +461,9 @@ export async function listInContainer(
   return execInContainer(rec, ["ls", "-1", dirPath]).then((s) => s.trim());
 }
 
-/** Pull latest image and recreate container. */
-export async function updateImage(rec: InstanceRecord, instanceDir: string): Promise<string> {
+/** Pull the latest image and remove the stopped container so the next start
+ * creates it from the freshly pulled image. The caller owns safe shutdown. */
+export async function pullLatestImage(rec: InstanceRecord): Promise<string> {
   const image = resolveImage(rec);
   const stream = await docker.pull(image);
   await new Promise<void>((resolve, reject) => {
@@ -469,9 +471,30 @@ export async function updateImage(rec: InstanceRecord, instanceDir: string): Pro
   });
   const container = await findContainer(rec);
   if (container) {
-    await container.stop({ t: 30 }).catch(() => {});
     await container.remove({ force: true });
   }
+  return image;
+}
+
+/** Return the digest actually used by the running container and the digest
+ * currently advertised by the image registry. */
+export async function imageVersionDigests(rec: InstanceRecord): Promise<{
+  current: string | null;
+  latest: string | null;
+}> {
+  const image = resolveImage(rec);
+  const container = await findContainer(rec);
+  if (!container) return { current: null, latest: await registryImageDigest(image) };
+  const info = await container.inspect();
+  const currentInspect = await docker.getImage(info.Image).inspect().catch(() => null);
+  const current = imageDigest(currentInspect?.RepoDigests?.[0] ?? info.Image);
+  return { current, latest: await registryImageDigest(image) };
+}
+
+/** Backward-compatible direct update helper. New update routes use the
+ * supervisor so shutdown/save/announce happen before this operation. */
+export async function updateImage(rec: InstanceRecord, instanceDir: string): Promise<string> {
+  const image = await pullLatestImage(rec);
   await startInstance(rec, instanceDir);
   return image;
 }

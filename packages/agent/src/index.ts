@@ -22,16 +22,16 @@ import { loadOrCreateTlsCert } from "./tls.js";
 import { InstanceStore } from "./store.js";
 import { PresenceTracker } from "./presence.js";
 import { BackupScheduler } from "./backup-scheduler.js";
-import { RestartSupervisor } from "./supervisor.js";
+import { RestartSupervisor, type UpdateRestartAction } from "./supervisor.js";
 import { PublicMapPublisher } from "./public-map.js";
 import { WebhooksService } from "./webhooks.js";
 import { DiscordBotManager } from "./discord-bot-manager.js";
 import { LogEventTracker } from "./log-event-tracker.js";
 import { BossEventTracker } from "./boss-event-tracker.js";
 import { fetchLatest } from "./version.js";
-import { isInstalling, nativeDriver } from "./native.js";
-import { dockerDriver } from "./docker.js";
-import { k8sDriver } from "./k8s.js";
+import { isInstalling, nativeDriver, updateServer } from "./native.js";
+import { dockerDriver, pullLatestImage } from "./docker.js";
+import { k8sDriver, rolloutRestart } from "./k8s.js";
 import { registerRoutes } from "./routes.js";
 import { startAutoScanLoop } from "./save-tools.js";
 import { activeWorldGuidAsync } from "./saves.js";
@@ -192,8 +192,15 @@ const scheduler = new BackupScheduler(store, (rec) =>
 );
 scheduler.start();
 
-const supervisor = new RestartSupervisor(store, (rec) =>
-  rec.backend === "native" ? nativeDriver : rec.backend === "k8s" ? k8sDriver : dockerDriver,
+const updateBeforeStart: UpdateRestartAction = async (rec, ctx) => {
+  if (rec.backend === "native") await updateServer(rec, ctx);
+  else if (rec.backend === "docker") await pullLatestImage(rec);
+  else await rolloutRestart(rec);
+};
+const supervisor = new RestartSupervisor(
+  store,
+  (rec) => rec.backend === "native" ? nativeDriver : rec.backend === "k8s" ? k8sDriver : dockerDriver,
+  updateBeforeStart,
 );
 supervisor.start();
 
@@ -278,7 +285,16 @@ void (async () => {
       const { status } = await driver.status(rec, { instanceDir: store.instanceDir(rec.id) });
       if (status === "running" || status === "restarting" || status === "installing") continue;
       app.log.info(`自動啟動伺服器:${rec.name}`);
-      await driver.start(rec, { instanceDir: store.instanceDir(rec.id) });
+      const ctx = { instanceDir: store.instanceDir(rec.id) };
+      const canStart = await supervisor.applyUpdateBeforeStart(rec, ctx, {
+        markRunning: true,
+        respectManualStop: true,
+      });
+      if (!canStart) continue;
+      const started = await driver.start(rec, ctx);
+      if (started) {
+        await supervisor.noteRuntimeStarted(rec, ctx);
+      }
     } catch (err) {
       app.log.warn(`自動啟動 ${rec.name} 失敗:${err instanceof Error ? err.message : String(err)}`);
     }

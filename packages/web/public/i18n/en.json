@@ -535,6 +535,7 @@
   "最新建置": "Latest build",
   "官方更新時間": "Official update time",
   "有新版本可更新。更新前建議先到「存檔備份」建立一份備份。": "An update is available. Before updating, make a backup on the Saves & backups tab.",
+  "偵測到新版本，自動更新已啟用，將自動安全套用。": "A new version is available. Auto-update is enabled and will apply it safely.",
   "啟動更新中…": "Starting update…",
   "已是最新版本": "Up to date",
   "無法判斷是否有新版本(可能連不上 Steam)。": "Can't determine whether an update exists (Steam may be unreachable).",

@@ -968,9 +968,11 @@ export interface SaveHealthStatus {
 
 /* ── automatic restarts ── */
 
-export type RestartReason = "scheduled" | "memory" | "crash" | "manual" | "startup-failure";
+export type RestartReason = "scheduled" | "memory" | "crash" | "manual" | "update" | "startup-failure";
 
 export interface RestartPolicy {
+  /** Download and safely restart when a new server version is detected. */
+  autoUpdate: boolean;
   /** Restart on a timer: every N minutes, or at fixed times of day. */
   scheduled: {
     enabled: boolean;
@@ -1007,6 +1009,7 @@ export interface RestartPolicy {
 }
 
 export const DEFAULT_RESTART_POLICY: RestartPolicy = {
+  autoUpdate: true,
   scheduled: { enabled: false, mode: "interval", intervalMinutes: 360, dailyTimes: ["05:00"] },
   memory: { enabled: false, thresholdMB: 12288, sustainedChecks: 3 },
   crash: { enabled: true, maxPerHour: 5 },
@@ -1045,6 +1048,10 @@ export interface VersionStatus {
   /** null when we can't tell (adopted Steam install, or Steam unreachable) */
   updateAvailable: boolean | null;
   checkedAt: string | null;
+  /** whether auto-update is enabled in the instance's restart policy;
+   *  the version card uses this to decide whether to prompt a manual update
+   *  or just inform the user that the new version will be applied automatically. */
+  autoUpdate: boolean;
 }
 
 /* ── config-file health (PalWorldSettings.ini / Engine.ini) ── */

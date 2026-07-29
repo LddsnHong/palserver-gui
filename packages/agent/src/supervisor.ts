@@ -13,7 +13,7 @@ import type { InstanceStore, InstanceRecord } from "./store.js";
 import { rest } from "./restapi.js";
 import { getPalDefenderConfig } from "./paldefender-config.js";
 import { newestPalDefenderLogLines } from "./native.js";
-import { cachedVersionSummary } from "./version.js";
+import { cachedVersionSummary, refreshImageVersionSummary } from "./version.js";
 import { emitAgentEvent } from "./events.js";
 
 /**
@@ -70,6 +70,14 @@ interface SupervisorState {
   events: RestartEvent[];
 }
 
+export type UpdateRestartPreparation = (rec: InstanceRecord) => Promise<InstanceRecord>;
+export type UpdateRestartAction = (rec: InstanceRecord, ctx: DriverContext) => Promise<void>;
+export type UpdateAvailabilityReader = (
+  rec: InstanceRecord,
+  ctx: DriverContext,
+) => ReturnType<typeof cachedVersionSummary>;
+export type ImageVersionRefresher = typeof refreshImageVersionSummary;
+
 const emptyState = (): SupervisorState => ({
   wasRunning: false,
   memoryStreak: 0,
@@ -86,11 +94,116 @@ export class RestartSupervisor {
   private lastStatus = new Map<string, InstanceStatus>();
   /** 上次觀測到的「有無可用更新」—— 只在 false→true(新版釋出)時 emit 一次,避免每 tick 重發。 */
   private lastUpdate = new Map<string, boolean>();
+  private updateRestartPreparation: UpdateRestartPreparation | null = null;
 
   constructor(
     private store: InstanceStore,
     private driverFor: (rec: InstanceRecord) => ServerDriver,
+    private updateBeforeStart?: UpdateRestartAction,
+    private readUpdateSummary: UpdateAvailabilityReader = cachedVersionSummary,
+    private refreshImageSummary: ImageVersionRefresher = refreshImageVersionSummary,
   ) {}
+
+  async noteRuntimeStarted(rec: InstanceRecord, ctx: DriverContext): Promise<void> {
+    try {
+      await this.refreshImageSummary(rec, ctx, {
+        runtimeRunning: true,
+        force: true,
+      });
+    } catch {
+      // Runtime readiness is authoritative; version evidence is best-effort.
+    }
+  }
+
+  /** Register route-owned state reconciliation that must happen before an
+   * update restart starts the freshly downloaded server. */
+  setUpdateRestartPreparation(preparation: UpdateRestartPreparation): void {
+    this.updateRestartPreparation = preparation;
+  }
+
+  /** Apply a detected update before any caller starts an instance. */
+  async applyUpdateBeforeStart(
+    rec: InstanceRecord,
+    ctx: DriverContext,
+    options: { markRunning?: boolean; respectManualStop?: boolean } = {},
+  ): Promise<boolean> {
+    if (options.markRunning) {
+      const state = this.readState(rec.id);
+      state.wasRunning = true;
+      this.writeState(rec.id, state);
+    }
+    try {
+      if (this.updateBeforeStart) {
+        const { updateAvailable } = this.readUpdateSummary(rec, ctx);
+        if (updateAvailable === true) await this.updateBeforeStart(rec, ctx);
+      }
+    } catch (err) {
+      if (options.markRunning) this.noteManualState(rec.id, false);
+      throw err;
+    }
+    return !options.respectManualStop || this.readState(rec.id).wasRunning;
+  }
+
+  /** Manual restart entry point: keep route-specific side effects while using
+   * the same safe stop/wait/start sequence as scheduled restarts. */
+  async restartForManual(
+    rec: InstanceRecord,
+    detail = "手動重啟",
+    options: { announceSeconds?: number } = {},
+  ): Promise<void> {
+    if (this.busy.has(rec.id)) return;
+    const ctx: DriverContext = { instanceDir: this.store.instanceDir(rec.id) };
+    const state = this.readState(rec.id);
+    state.wasRunning = true;
+    this.writeState(rec.id, state);
+    const policy = this.readPolicy(rec.id);
+    if (options.announceSeconds !== undefined) policy.announceSeconds = options.announceSeconds;
+    const prepare = async (value: InstanceRecord): Promise<InstanceRecord> => {
+      await this.applyUpdateBeforeStart(value, ctx);
+      return this.updateRestartPreparation ? this.updateRestartPreparation(value) : value;
+    };
+    await this.restart(
+      rec,
+      ctx,
+      this.driverFor(rec),
+      policy,
+      state,
+      "manual",
+      detail,
+      prepare,
+    );
+  }
+
+  /** Public update entry point that keeps SupervisorState private while
+   * reusing the same safe restart sequence as scheduled restarts. */
+  async restartForUpdate(
+    rec: InstanceRecord,
+    detail = "伺服器更新完成",
+    update?: UpdateRestartAction,
+  ): Promise<void> {
+    if (this.busy.has(rec.id)) return;
+    const ctx: DriverContext = { instanceDir: this.store.instanceDir(rec.id) };
+    const state = this.readState(rec.id);
+    // An explicit update means "apply the downloaded server and bring it up",
+    // even when the user started the update while the instance was stopped.
+    state.wasRunning = true;
+    this.writeState(rec.id, state);
+    const prepare = async (value: InstanceRecord): Promise<InstanceRecord> => {
+      if (update) await update(value, ctx);
+      else if (this.updateBeforeStart) await this.updateBeforeStart(value, ctx);
+      return this.updateRestartPreparation ? this.updateRestartPreparation(value) : value;
+    };
+    await this.restart(
+      rec,
+      ctx,
+      this.driverFor(rec),
+      this.readPolicy(rec.id),
+      state,
+      "update",
+      detail,
+      prepare,
+    );
+  }
 
   start(): void {
     if (this.timer) return;
@@ -184,13 +297,21 @@ export class RestartSupervisor {
 
   /** 遊戲伺服器有新版可更新 → emit 一次(只在 false→true;null/未知不動)。快取由 agent 週期
    *  fetchLatest 刷新(見 index.ts),故新版釋出後最多一個 tick 內就會偵測到。 */
-  private emitUpdateTransition(rec: InstanceRecord, ctx: DriverContext): void {
-    const { updateAvailable, gameVersion } = cachedVersionSummary(rec, ctx);
+  private async emitUpdateTransition(
+    rec: InstanceRecord,
+    ctx: DriverContext,
+    policy: RestartPolicy,
+    status: InstanceStatus,
+  ): Promise<void> {
+    const { updateAvailable, gameVersion } = this.readUpdateSummary(rec, ctx);
     if (typeof updateAvailable !== "boolean") return; // null=未知(非 native/無快取)→ 不動
     const prev = this.lastUpdate.get(rec.id);
     this.lastUpdate.set(rec.id, updateAvailable);
     if (prev === false && updateAvailable === true) {
       emitAgentEvent("server.update_available", rec.id, { current: gameVersion ?? "", latest: "" });
+      if (policy.autoUpdate && status === "running") {
+        await this.restartForUpdate(rec, "偵測到新版本,已自動更新");
+      }
     }
   }
 
@@ -232,7 +353,8 @@ export class RestartSupervisor {
     // native 由 native driver 直接發精準的生命週期事件(starting/running/exited/crash,見 native.ts);
     // 這裡的輪詢轉移只給 docker/k8s 兜底(它們沒有 child handle / REST 探測那條路)。
     if (rec.backend !== "native") this.emitStatusTransition(rec.id, status);
-    this.emitUpdateTransition(rec, ctx);
+    await this.refreshImageSummary(rec, ctx, { runtimeRunning: status === "running" });
+    await this.emitUpdateTransition(rec, ctx, policy, status);
 
     if (status !== "running") {
       // Crashed if we saw it running before and nobody asked us to stop it.
@@ -353,9 +475,23 @@ export class RestartSupervisor {
 
     this.busy.add(rec.id);
     try {
+      await this.applyUpdateBeforeStart(rec, ctx);
+      const afterUpdate = this.readState(rec.id);
+      if (!afterUpdate.wasRunning) {
+        this.record(rec.id, afterUpdate, {
+          at: new Date().toISOString(),
+          reason: "crash",
+          ok: false,
+          detail: "更新準備期間偵測到手動停止 — 尊重停止指令,略過自動啟動。",
+        });
+        return;
+      }
       const started = await driver.start(rec, ctx);
       const at = new Date().toISOString();
-      if (started) state.recentRestarts = [...recent, at];
+      if (started) {
+        state.recentRestarts = [...recent, at];
+        await this.noteRuntimeStarted(rec, ctx);
+      }
       state.wasRunning = true;
       state.lastStartAt = at;
       this.record(rec.id, state, {
@@ -388,6 +524,7 @@ export class RestartSupervisor {
     state: SupervisorState,
     reason: RestartReason,
     detail: string,
+    prepareBeforeStart?: UpdateRestartPreparation,
   ): Promise<void> {
     this.busy.add(rec.id);
     // interval 模式的下一輪從「本輪觸發」起算,而不是完成時 —— 否則每輪都往後
@@ -435,6 +572,10 @@ export class RestartSupervisor {
       if (!shutdownOk) {
         await driver.stop(rec, ctx);
       } else {
+        // StatefulSet controllers restart a Pod whose PID 1 exits while the
+        // replica count remains 1. Scale k8s to zero after graceful shutdown
+        // so the update preparation cannot be bypassed by a replacement Pod.
+        if (rec.backend === "k8s") await driver.stop(rec, ctx);
         // Graceful shutdown succeeded — but the server only *begins* exiting
         // after the announced waittime (10s), and flushing a big world can take
         // longer still. Poll until the old process is really gone: starting the
@@ -487,10 +628,29 @@ export class RestartSupervisor {
         return;
       }
 
-      const started = await driver.start(rec, ctx);
+      const startRec = prepareBeforeStart ? await prepareBeforeStart(rec) : rec;
+      if (!prepareBeforeStart && reason !== "update") {
+        await this.applyUpdateBeforeStart(rec, ctx);
+      }
+      // The update/pull/rollout callback can take minutes. A manual stop during
+      // that work must win over the eventual start.
+      const afterPrepare = this.readState(rec.id);
+      if (!afterPrepare.wasRunning) {
+        afterPrepare.lastDailyFire = state.lastDailyFire;
+        this.record(rec.id, afterPrepare, {
+          at: new Date().toISOString(),
+          reason,
+          ok: false,
+          detail: "更新準備期間偵測到手動停止 — 尊重停止指令,本次重啟取消(伺服器維持停止)。",
+        });
+        return;
+      }
+      const startDriver = prepareBeforeStart ? this.driverFor(startRec) : driver;
+      const started = await startDriver.start(startRec, ctx);
       if (!started) {
         throw new Error("舊伺服器程序尚未退出,無法啟動新程序 — 本次重啟未執行(伺服器維持原狀)");
       }
+      await this.noteRuntimeStarted(startRec, ctx);
 
       // Re-read state instead of writing back the copy we've held across a
       // wait that can span minutes — a concurrent manual start/stop updates
