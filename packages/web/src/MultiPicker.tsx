@@ -16,6 +16,8 @@ export function MultiPicker({
   max,
   placeholder,
   renderMeta,
+  closeOnSelect = false,
+  ariaLabel,
 }: {
   catalog: GameEntity[];
   value: string[];
@@ -23,6 +25,8 @@ export function MultiPicker({
   max: number;
   placeholder?: string;
   renderMeta?: (e: GameEntity) => ReactNode;
+  closeOnSelect?: boolean;
+  ariaLabel?: string;
 }) {
   useI18n();
   const [query, setQuery] = useState("");
@@ -66,6 +70,7 @@ export function MultiPicker({
     onChange([...value, clean]);
     setQuery("");
     setHighlight(0);
+    if (closeOnSelect) setOpen(false);
   };
   const remove = (id: string) => onChange(value.filter((v) => v !== id));
 
@@ -98,6 +103,7 @@ export function MultiPicker({
           <input
             className={inputCls + " w-full"}
             value={query}
+            aria-label={ariaLabel}
             placeholder={placeholder ?? t("搜尋名稱或直接輸入 ID…")}
             onChange={(e) => {
               setQuery(e.target.value);
