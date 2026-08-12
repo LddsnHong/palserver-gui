@@ -24,9 +24,17 @@ export interface BreedingNode {
 
 export interface BreedingSolution {
   target: BreedingNode | null;
+  routes: BreedingRoute[];
   reachableSpecies: number;
   requiredCaptures: BreedingNode[];
 }
+
+export interface BreedingRoute {
+  target: BreedingNode;
+  requiredCaptures: BreedingNode[];
+}
+
+const MAX_ALTERNATIVE_ROUTES = 5;
 
 function canonicalSpecies(id: string, names: Map<string, string>): string {
   const bare = id.replace(/^BOSS_/i, "");
@@ -56,12 +64,29 @@ function sourceScore(node: BreedingNode): number {
   );
 }
 
-function better(candidate: BreedingNode, current?: BreedingNode): boolean {
-  if (!current) return true;
-  if (candidate.captureCount !== current.captureCount) return candidate.captureCount < current.captureCount;
-  if (candidate.generation !== current.generation) return candidate.generation < current.generation;
-  if (candidate.breedCount !== current.breedCount) return candidate.breedCount < current.breedCount;
-  return sourceScore(candidate) > sourceScore(current);
+function compareNodes(a: BreedingNode, b: BreedingNode): number {
+  return (
+    a.captureCount - b.captureCount ||
+    a.generation - b.generation ||
+    a.breedCount - b.breedCount ||
+    sourceScore(b) - sourceScore(a)
+  );
+}
+
+const routeKeyCache = new WeakMap<BreedingNode, string>();
+
+function routeKey(node: BreedingNode): string {
+  const cached = routeKeyCache.get(node);
+  if (cached) return cached;
+  let key: string;
+  // 路線描述的是物種與詞條的配種思路；個體和性別只用來選出一組實際可配的親代，
+  // 不應讓同一棵物種樹重複佔用候選名額。
+  if (node.source) key = `source:${node.species}:${node.passiveMask}`;
+  else if (node.requiredCapture) key = `capture:${node.species}`;
+  else if (!node.parents) key = `${node.species}:${node.gender}:${node.passiveMask}`;
+  else key = `${node.species}:${node.gender}:${node.passiveMask}(${routeKey(node.parents[0])}+${routeKey(node.parents[1])})`;
+  routeKeyCache.set(node, key);
+  return key;
 }
 
 function matchesGender(actual: BreedingGender, required: BreedingGender): boolean {
@@ -87,6 +112,7 @@ export function solveBreeding(
   targetId: string,
   desiredPassives: string[],
   maxGenerations: number,
+  onProgress?: (routes: BreedingRoute[]) => void,
 ): BreedingSolution {
   const canonical = new Map<string, string>();
   for (const [p1, , p2, , child] of data.recipes) {
@@ -97,12 +123,42 @@ export function solveBreeding(
 
   const targetSpecies = canonicalSpecies(targetId, canonical);
   const fullMask = (1 << desiredPassives.length) - 1;
+  const routeFor = (target: BreedingNode): BreedingRoute => {
+    const captures = new Map<string, BreedingNode>();
+    const collectCaptures = (node: BreedingNode) => {
+      if (node.requiredCapture) captures.set(`${node.species}\u0000${node.gender}`, node);
+      node.parents?.forEach(collectCaptures);
+    };
+    collectCaptures(target);
+    return { target, requiredCaptures: [...captures.values()] };
+  };
 
   const search = (allowCaptures: boolean) => {
-    const states = new Map<string, BreedingNode>();
+    const states = new Map<string, BreedingNode[]>();
+    const discoveredTargets: BreedingNode[] = [];
+    const discoveredKeys = new Set<string>();
+    let reportedCount = 0;
     const add = (node: BreedingNode, dest = states) => {
       const key = stateKey(node);
-      if (better(node, dest.get(key))) dest.set(key, node);
+      const current = dest.get(key) ?? [];
+      const signature = routeKey(node);
+      const distinct = current.filter((candidate) => routeKey(candidate) !== signature);
+      dest.set(key, [...distinct, node].sort(compareNodes).slice(0, MAX_ALTERNATIVE_ROUTES));
+      if (
+        onProgress &&
+        node.species === targetSpecies &&
+        node.passiveMask === fullMask &&
+        node.parents &&
+        !discoveredKeys.has(signature)
+      ) {
+        discoveredKeys.add(signature);
+        discoveredTargets.push(node);
+        discoveredTargets.sort(compareNodes);
+        if (reportedCount < MAX_ALTERNATIVE_ROUTES && discoveredTargets.length > reportedCount) {
+          reportedCount += 1;
+          onProgress(discoveredTargets.slice(0, reportedCount).map(routeFor));
+        }
+      }
     };
 
     for (const pal of owned) {
@@ -138,12 +194,14 @@ export function solveBreeding(
 
     for (let generation = 1; generation <= Math.max(0, maxGenerations); generation++) {
       const bySpecies = new Map<string, BreedingNode[]>();
-      for (const node of states.values()) {
-        const list = bySpecies.get(node.species) ?? [];
-        list.push(node);
-        bySpecies.set(node.species, list);
+      for (const candidates of states.values()) {
+        for (const node of candidates) {
+          const list = bySpecies.get(node.species) ?? [];
+          list.push(node);
+          bySpecies.set(node.species, list);
+        }
       }
-      const staged = new Map<string, BreedingNode>();
+      const staged = new Map<string, BreedingNode[]>();
 
       for (const [parent1, gender1, parent2, gender2, child] of data.recipes) {
         const left = bySpecies.get(parent1);
@@ -169,37 +227,30 @@ export function solveBreeding(
           }
         }
       }
-      for (const node of staged.values()) add(node);
+      for (const candidates of staged.values()) {
+        for (const node of candidates) add(node);
+      }
     }
 
-    const candidates = [...states.values()].filter(
+    const candidates = [...states.values()].flat().filter(
       (node) =>
         node.species === targetSpecies &&
         node.passiveMask === fullMask &&
         Boolean(node.parents),
     );
-    candidates.sort((a, b) =>
-      a.captureCount - b.captureCount ||
-      a.generation - b.generation ||
-      a.breedCount - b.breedCount ||
-      sourceScore(b) - sourceScore(a),
-    );
-    return { target: candidates[0] ?? null, states };
+    candidates.sort(compareNodes);
+    return { targets: candidates.slice(0, MAX_ALTERNATIVE_ROUTES), states };
   };
 
   const ownedOnly = search(false);
-  const target = ownedOnly.target ?? search(true).target;
-  const captures = new Map<string, BreedingNode>();
-  const collectCaptures = (node: BreedingNode | null) => {
-    if (!node) return;
-    if (node.requiredCapture) captures.set(`${node.species}\u0000${node.gender}`, node);
-    node.parents?.forEach(collectCaptures);
-  };
-  collectCaptures(target);
+  const targets = ownedOnly.targets.length > 0 ? ownedOnly.targets : search(true).targets;
+  const routes = targets.map(routeFor);
+  const primary = routes[0];
 
   return {
-    target,
-    reachableSpecies: new Set([...ownedOnly.states.values()].map((node) => node.species)).size,
-    requiredCaptures: [...captures.values()],
+    target: primary?.target ?? null,
+    routes,
+    reachableSpecies: new Set([...ownedOnly.states.values()].flat().map((node) => node.species)).size,
+    requiredCaptures: primary?.requiredCaptures ?? [],
   };
 }

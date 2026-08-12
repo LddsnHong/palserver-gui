@@ -1,16 +1,39 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FiCrosshair, FiGitBranch, FiMapPin, FiMaximize2, FiRefreshCw, FiSearch, FiZoomIn, FiZoomOut } from "react-icons/fi";
+import { FiBookmark, FiChevronDown, FiCrosshair, FiGitBranch, FiMapPin, FiMaximize2, FiRefreshCw, FiSearch, FiTrash2, FiZoomIn, FiZoomOut } from "react-icons/fi";
 import { GiEggClutch } from "react-icons/gi";
 import { hasFeature, savToMap, type SaveBreedingPal } from "@palserver/shared";
 import type { AgentClient } from "./api";
 import { EntityPicker } from "./EntityPicker";
 import { MultiPicker } from "./MultiPicker";
 import { displayName, palIconUrl, useGameData, type GameData } from "./gameData";
-import { solveBreeding, type BreedingData, type BreedingNode } from "./breedingSolver";
+import type { BreedingData, BreedingNode, BreedingRoute, BreedingSolution } from "./breedingSolver";
 import { t, useI18n } from "./i18n";
 import { EmptyState, SponsorLockNotice, btn, btnGhost, card, errorCls, labelCls, Select } from "./ui";
 
 let recipesCache: BreedingData | null = null;
+const PASSIVE_PRESETS_KEY = "palserver.breeding.passivePresets";
+
+function loadPassivePresets(): string[][] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(PASSIVE_PRESETS_KEY) ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((preset): preset is string[] =>
+        Array.isArray(preset) &&
+        preset.length > 0 &&
+        preset.length <= 4 &&
+        preset.every((id) => typeof id === "string" && id.length > 0),
+      )
+      .map((preset) => [...new Set(preset)]);
+  } catch {
+    return [];
+  }
+}
+
+function passivePresetKey(ids: string[]): string {
+  return [...ids].sort().join("\u0000");
+}
+
 async function loadBreedingData(): Promise<BreedingData> {
   if (recipesCache) return recipesCache;
   const response = await fetch("/game-data/breeding.json");
@@ -275,6 +298,90 @@ function BreedingTree({ target, data, desired, captureCount, onShowOnMap }: { ta
   );
 }
 
+interface BreedingHistoryEntry {
+  id: number;
+  targetId: string;
+  desired: string[];
+  ownerUid: string;
+  maxGenerations: number;
+  solution: BreedingSolution;
+}
+
+type BreedingWorkerResponse =
+  | { type: "progress"; routes: BreedingRoute[] }
+  | { type: "complete"; solution: BreedingSolution }
+  | { type: "error"; error: string };
+
+function BreedingRoutePanel({
+  route,
+  index,
+  data,
+  desired,
+  defaultOpen,
+  onShowOnMap,
+}: {
+  route: BreedingRoute;
+  index: number;
+  data: GameData | null;
+  desired: string[];
+  defaultOpen: boolean;
+  onShowOnMap?: (x: number, y: number) => void;
+}) {
+  const { target, requiredCaptures } = route;
+  return (
+    <details className={`${card} group`} open={defaultOpen}>
+      <summary className="flex cursor-pointer list-none items-center gap-3 [&::-webkit-details-marker]:hidden">
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-full border-2 border-pal/40 bg-pal/10 text-sm font-extrabold text-pal">{index + 1}</span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm font-extrabold">{t("配種路線 {n}", { n: index + 1 })}</span>
+          <span className="block text-xs text-ink-muted">
+            {requiredCaptures.length > 0
+              ? t("{generations} 代 · 共 {steps} 次配種 · 需捕捉 {captures} 隻", {
+                  generations: target.generation,
+                  steps: target.breedCount,
+                  captures: requiredCaptures.length,
+                })
+              : t("{generations} 代 · 共 {steps} 次配種", {
+                  generations: target.generation,
+                  steps: target.breedCount,
+                })}
+          </span>
+        </span>
+        <FiChevronDown className="size-5 shrink-0 text-ink-muted transition group-open:rotate-180" />
+      </summary>
+
+      <div className="mt-4 border-t-2 border-line pt-4">
+        {requiredCaptures.length > 0 && (
+          <div className="mb-4 rounded-md border-2 border-sun/50 bg-sun/10 p-4">
+            <p className="inline-flex items-center gap-2 text-sm font-extrabold text-ink">
+              <FiCrosshair className="size-4 text-sun" />
+              {t("現有帕魯不足，補充捕捉 {n} 隻帕魯後可配種", { n: requiredCaptures.length })}
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {requiredCaptures.map((node) => (
+                <span key={`${node.species}-${node.gender}`} className="inline-flex items-center gap-1.5 rounded-md border border-sun/60 bg-card px-2 py-1 text-xs font-bold text-ink">
+                  {palName(data, node.species)}
+                  <span className="text-ink-muted">{node.gender === "m" ? "♂" : "♀"}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {target.generation > 0 && (
+          <BreedingTree
+            target={target}
+            data={data}
+            desired={desired}
+            captureCount={requiredCaptures.length}
+            onShowOnMap={onShowOnMap}
+          />
+        )}
+      </div>
+    </details>
+  );
+}
+
 export function BreedingTab({ client, instanceId, onShowOnMap }: { client: AgentClient; instanceId: string; onShowOnMap?: (x: number, y: number) => void }) {
   useI18n();
   const gameData = useGameData();
@@ -288,12 +395,24 @@ export function BreedingTab({ client, instanceId, onShowOnMap }: { client: Agent
   const [error, setError] = useState<string | null>(null);
   const [targetId, setTargetId] = useState("");
   const [passives, setPassives] = useState<string[]>([]);
+  const [passivePresets, setPassivePresets] = useState<string[][]>(loadPassivePresets);
   const [ownerUid, setOwnerUid] = useState("");
   const [maxGenerations, setMaxGenerations] = useState(4);
   const [calculating, setCalculating] = useState(false);
-  const [solution, setSolution] = useState<ReturnType<typeof solveBreeding> | null>(null);
+  const [history, setHistory] = useState<BreedingHistoryEntry[]>([]);
+  const [activeHistoryId, setActiveHistoryId] = useState<number | null>(null);
   const [entitled, setEntitled] = useState<boolean | null>(null);
   const scanTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const calculationRun = useRef(0);
+  const cancelCalculation = useRef<(() => void) | null>(null);
+  const nextHistoryId = useRef(1);
+  const invalidateDraft = useCallback(() => {
+    calculationRun.current += 1;
+    cancelCalculation.current?.();
+    cancelCalculation.current = null;
+    setCalculating(false);
+    setActiveHistoryId(null);
+  }, []);
 
   useEffect(() => {
     client
@@ -304,6 +423,7 @@ export function BreedingTab({ client, instanceId, onShowOnMap }: { client: Agent
   useEffect(
     () => () => {
       if (scanTimer.current) clearInterval(scanTimer.current);
+      cancelCalculation.current?.();
     },
     [],
   );
@@ -319,7 +439,8 @@ export function BreedingTab({ client, instanceId, onShowOnMap }: { client: Agent
       setPals(snapshot.pals);
       setGeneratedAt(snapshot.generatedAt);
       setWorldGuid(snapshot.worldGuid);
-      setSolution(null);
+      setHistory([]);
+      setActiveHistoryId(null);
       setError(null);
       try {
         setCanScan((await client.saveHealth(instanceId, snapshot.worldGuid)).supported);
@@ -397,16 +518,143 @@ export function BreedingTab({ client, instanceId, onShowOnMap }: { client: Agent
 
   const calculate = async () => {
     if (!breedingData || !targetId) return;
+    cancelCalculation.current?.();
+    const run = ++calculationRun.current;
+    const entryId = nextHistoryId.current++;
+    const requestTargetId = targetId;
+    const requestDesired = [...passives];
+    const requestOwnerUid = ownerUid;
+    const requestMaxGenerations = maxGenerations;
+    const upsertEntry = (solution: BreedingSolution) => {
+      const entry: BreedingHistoryEntry = {
+        id: entryId,
+        targetId: requestTargetId,
+        desired: requestDesired,
+        ownerUid: requestOwnerUid,
+        maxGenerations: requestMaxGenerations,
+        solution,
+      };
+      setHistory((current) => {
+        const exists = current.some((item) => item.id === entryId);
+        return exists
+          ? current.map((item) => item.id === entryId ? entry : item)
+          : [entry, ...current].slice(0, 20);
+      });
+      setActiveHistoryId(entryId);
+    };
     setCalculating(true);
-    // 雙層 rAF:第一層在本幀 paint 前執行,巢狀的第二層落在下一幀 —— 讓「計算中…」先繪製出來,
-    // 同步求解才不會把這格 paint 一起卡死(單層 rAF 的 resolve 仍在 paint 之前)。
-    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    setError(null);
+    const worker = new Worker(new URL("./breedingWorker.ts", import.meta.url), { type: "module" });
     try {
-      setSolution(solveBreeding(breedingData, available, targetId, passives, maxGenerations));
+      const solution = await new Promise<BreedingSolution | null>((resolve, reject) => {
+        let settled = false;
+        let displayedRouteCount = 0;
+        let latestRoutes: BreedingRoute[] = [];
+        let finalSolution: BreedingSolution | null = null;
+        let progressTimer: ReturnType<typeof setTimeout> | null = null;
+        const cleanup = () => {
+          if (progressTimer) clearTimeout(progressTimer);
+          worker.terminate();
+          if (cancelCalculation.current === cancel) cancelCalculation.current = null;
+        };
+        const finish = () => {
+          if (!finalSolution || settled) return;
+          settled = true;
+          const result = finalSolution;
+          cleanup();
+          resolve(result);
+        };
+        const showNextRoute = () => {
+          progressTimer = null;
+          if (settled) return;
+          if (displayedRouteCount < latestRoutes.length) {
+            displayedRouteCount += 1;
+            const routes = latestRoutes.slice(0, displayedRouteCount);
+            if (calculationRun.current === run) {
+              upsertEntry({
+                target: routes[0]?.target ?? null,
+                routes,
+                reachableSpecies: finalSolution?.reachableSpecies ?? 0,
+                requiredCaptures: routes[0]?.requiredCaptures ?? [],
+              });
+            }
+          }
+          if (displayedRouteCount < latestRoutes.length) {
+            progressTimer = setTimeout(showNextRoute, 220);
+          } else if (finalSolution) {
+            finish();
+          }
+        };
+        const queueRoutes = (routes: BreedingRoute[]) => {
+          latestRoutes = routes;
+          if (displayedRouteCount === 0) showNextRoute();
+          else if (displayedRouteCount < latestRoutes.length && !progressTimer) {
+            progressTimer = setTimeout(showNextRoute, 220);
+          }
+        };
+        const cancel = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(null);
+        };
+        cancelCalculation.current = cancel;
+        worker.onmessage = (event: MessageEvent<BreedingWorkerResponse>) => {
+          if (settled) return;
+          if (event.data.type === "progress") {
+            queueRoutes(event.data.routes);
+            return;
+          }
+          if (event.data.type === "complete") {
+            finalSolution = event.data.solution;
+            queueRoutes(finalSolution.routes);
+            if (finalSolution.routes.length === 0 || displayedRouteCount >= finalSolution.routes.length) finish();
+            return;
+          }
+          settled = true;
+          cleanup();
+          reject(new Error(event.data.error));
+        };
+        worker.onerror = (event) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(new Error(event.message || t("配種計算執行緒發生錯誤")));
+        };
+        worker.postMessage({
+          data: breedingData,
+          owned: available,
+          targetId: requestTargetId,
+          desiredPassives: requestDesired,
+          maxGenerations: requestMaxGenerations,
+        });
+      });
+      if (!solution || calculationRun.current !== run) return;
+      upsertEntry(solution);
+    } catch (err) {
+      if (calculationRun.current === run) {
+        setError(t("配種計算失敗:{error}", { error: err instanceof Error ? err.message : String(err) }));
+      }
     } finally {
-      setCalculating(false);
+      if (calculationRun.current === run) setCalculating(false);
     }
   };
+
+  const savePassivePreset = (ids: string[]) => {
+    if (ids.length === 0) return;
+    const key = passivePresetKey(ids);
+    if (passivePresets.some((preset) => passivePresetKey(preset) === key)) return;
+    const next = [...passivePresets, [...ids]];
+    setPassivePresets(next);
+    localStorage.setItem(PASSIVE_PRESETS_KEY, JSON.stringify(next));
+  };
+
+  const removePassivePreset = (index: number) => {
+    const next = passivePresets.filter((_, current) => current !== index);
+    setPassivePresets(next);
+    localStorage.setItem(PASSIVE_PRESETS_KEY, JSON.stringify(next));
+  };
+  const activeEntry = history.find((entry) => entry.id === activeHistoryId) ?? null;
 
   if (entitled === false)
     return <SponsorLockNotice>{t("這是贊助者先行版功能。到「設定 → 贊助者識別碼」輸入識別碼即可使用。")}</SponsorLockNotice>;
@@ -432,96 +680,162 @@ export function BreedingTab({ client, instanceId, onShowOnMap }: { client: Agent
       </div>
       {error && <p className={errorCls}>{error}</p>}
 
-      <div className={`${card} grid gap-4 md:grid-cols-2`}>
-        <label className="flex flex-col gap-1.5">
-          <span className={labelCls}>{t("目標帕魯")}</span>
-          <EntityPicker
-            catalog={gameData?.pals ?? []}
-            iconUrl={palIconUrl}
-            value={targetId}
-            onChange={(id) => {
-              setTargetId(id);
-              setSolution(null);
-            }}
-            placeholder={t("搜尋目標帕魯…")}
-          />
-        </label>
-        <label className="flex flex-col gap-1.5">
-          <span className={labelCls}>{t("使用範圍")}</span>
-          <Select
-            value={ownerUid}
-            onChange={(event) => {
-              setOwnerUid(event.target.value);
-              setSolution(null);
-            }}
-          >
-            <option value="">{t("全服玩家及公會據點的帕魯")}</option>
-            {owners.map(([uid, name]) => <option key={uid} value={uid}>{name}</option>)}
-          </Select>
-        </label>
-        <div className="flex flex-col gap-1.5 md:col-span-2">
-          <span className={labelCls}>{t("目標被動詞條(最多 4 個)")}</span>
-          <MultiPicker
-            catalog={gameData?.passives ?? []}
-            value={passives}
-            onChange={(ids) => {
-              setPassives(ids);
-              setSolution(null);
-            }}
-            max={4}
-            placeholder={t("搜尋被動詞條…")}
-          />
-        </div>
-        <label className="flex flex-col gap-1.5">
-          <span className={labelCls}>{t("最大配種代數")}</span>
-          <Select
-            value={String(maxGenerations)}
-            onChange={(event) => {
-              setMaxGenerations(Number(event.target.value));
-              setSolution(null);
-            }}
-          >
-            {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{t("{n} 代", { n })}</option>)}
-          </Select>
-        </label>
-        <div className="flex items-end">
-          <button className={`${btn} inline-flex w-full items-center justify-center gap-1.5`} disabled={!targetId || !generatedAt || calculating} onClick={() => void calculate()}>
-            <FiSearch className="size-4" /> {calculating ? t("計算中…") : t("計算最短路徑")}
-          </button>
+      <div className="grid items-start gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
+        <aside className={`${card} lg:sticky lg:top-4`}>
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-extrabold text-ink">{t("配種歷史")}</h3>
+              <p className="mt-0.5 text-xs text-ink-muted">{t("點擊記錄切換查詢結果")}</p>
+            </div>
+            {history.length > 0 && (
+              <button type="button" className="text-xs font-bold text-ink-muted transition hover:text-berry" onClick={() => { setHistory([]); setActiveHistoryId(null); }}>
+                {t("清除")}
+              </button>
+            )}
+          </div>
+          {history.length === 0 ? (
+            <p className="mt-4 rounded-lg border-2 border-dashed border-line px-3 py-6 text-center text-xs text-ink-muted">{t("尚無配種記錄")}</p>
+          ) : (
+            <div className="mt-3 flex flex-col gap-2">
+              {history.map((entry) => {
+                const entity = gameData?.palByIdLower.get(speciesId(entry.targetId).toLowerCase());
+                return (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    className={`flex min-w-0 items-center gap-2 rounded-lg border-2 p-2.5 text-left transition ${activeHistoryId === entry.id ? "border-pal bg-pal/10" : "border-line bg-card-soft/40 hover:border-pal/50"}`}
+                    onClick={() => {
+                      invalidateDraft();
+                      setTargetId(entry.targetId);
+                      setPassives([...entry.desired]);
+                      setOwnerUid(entry.ownerUid);
+                      setMaxGenerations(entry.maxGenerations);
+                      setActiveHistoryId(entry.id);
+                    }}
+                  >
+                    <span className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-full border border-line bg-card">
+                      {entity?.icon && <img src={palIconUrl(entity.icon)} alt="" className="size-full object-contain" />}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-xs font-extrabold text-ink">{palName(gameData, entry.targetId)}</span>
+                      <span className="mt-0.5 block truncate text-[11px] text-ink-muted">
+                        {entry.desired.length > 0 ? entry.desired.map((id) => gameData?.passiveById.get(id) ? displayName(gameData.passiveById.get(id)!) : id).join(" + ") : t("不限詞條")}
+                      </span>
+                    </span>
+                    <span className="shrink-0 text-[11px] font-bold text-ink-muted">{entry.solution.routes.length}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </aside>
+
+        <div className="flex min-w-0 flex-col gap-4">
+          <div className={`${card} !p-0`}>
+            <div className="border-b-2 border-line px-5 py-4">
+              <h3 className="text-base font-extrabold text-ink">{t("新增配種查詢")}</h3>
+              <p className="mt-1 text-xs text-ink-muted">{t("設定一隻目標帕魯，計算最多 5 條候選路線。")}</p>
+            </div>
+            <div className="grid gap-4 px-5 py-5 md:grid-cols-2">
+              <div className="flex flex-col gap-1.5">
+                <span className={labelCls}>{t("目標帕魯")}</span>
+                <EntityPicker
+                  catalog={gameData?.pals ?? []}
+                  iconUrl={palIconUrl}
+                  value={targetId}
+                  onChange={(id) => { setTargetId(id); invalidateDraft(); }}
+                  placeholder={t("搜尋目標帕魯…")}
+                />
+              </div>
+              <label className="flex flex-col gap-1.5">
+                <span className={labelCls}>{t("使用範圍")}</span>
+                <Select value={ownerUid} onChange={(event) => { setOwnerUid(event.target.value); invalidateDraft(); }}>
+                  <option value="">{t("全服玩家及公會據點的帕魯")}</option>
+                  {owners.map(([uid, name]) => <option key={uid} value={uid}>{name}</option>)}
+                </Select>
+              </label>
+              <div className="flex flex-col gap-2 md:col-span-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className={labelCls}>{t("目標被動詞條(最多 4 個)")}</span>
+                  <button
+                    type="button"
+                    className={`${btnGhost} inline-flex items-center gap-1.5 !px-2.5 !py-1.5`}
+                    disabled={passives.length === 0 || passivePresets.some((preset) => passivePresetKey(preset) === passivePresetKey(passives))}
+                    onClick={() => savePassivePreset(passives)}
+                  >
+                    <FiBookmark className="size-3.5" /> {t("儲存組合")}
+                  </button>
+                </div>
+                <MultiPicker
+                  catalog={gameData?.passives ?? []}
+                  value={passives}
+                  onChange={(ids) => { setPassives(ids); invalidateDraft(); }}
+                  max={4}
+                  closeOnSelect
+                  ariaLabel={t("目標被動詞條(最多 4 個)")}
+                  placeholder={t("搜尋被動詞條…")}
+                />
+                {passivePresets.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-bold text-ink-muted">{t("常用組合")}</span>
+                    {passivePresets.map((preset, index) => (
+                      <span key={passivePresetKey(preset)} className="inline-flex max-w-full items-center overflow-hidden rounded-full border-2 border-line bg-card-soft text-xs">
+                        <button type="button" className="max-w-80 truncate py-1 pr-1 pl-2.5 font-bold text-ink transition hover:text-pal" onClick={() => { setPassives([...preset]); invalidateDraft(); }}>
+                          {preset.map((id) => gameData?.passiveById.get(id) ? displayName(gameData.passiveById.get(id)!) : id).join(" + ")}
+                        </button>
+                        <button type="button" className="p-1.5 text-ink-muted transition hover:text-berry" onClick={() => removePassivePreset(index)} aria-label={t("刪除常用組合")} title={t("刪除常用組合")}>
+                          <FiTrash2 className="size-3.5" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <label className="flex flex-col gap-1.5">
+                <span className={labelCls}>{t("最大配種代數")}</span>
+                <Select value={String(maxGenerations)} onChange={(event) => { setMaxGenerations(Number(event.target.value)); invalidateDraft(); }}>
+                  {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{t("{n} 代", { n })}</option>)}
+                </Select>
+              </label>
+              <div className="flex items-end">
+                <button className={`${btn} inline-flex w-full items-center justify-center gap-1.5`} disabled={!targetId || !generatedAt || calculating} onClick={() => void calculate()}>
+                  <FiSearch className="size-4" /> {calculating ? t("計算中…") : t("尋找多條配種路線")}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {activeEntry && (
+            <>
+              <div>
+                <h3 className="text-base font-extrabold text-ink">{palName(gameData, activeEntry.targetId)}</h3>
+                <p className="mt-1 text-xs text-ink-muted">{t("找到 {n} 條候選路線", { n: activeEntry.solution.routes.length })}</p>
+              </div>
+              {activeEntry.solution.routes.length === 0 ? (
+                <EmptyState icon={<GiEggClutch />} title={t("在 {n} 代內找不到路徑", { n: activeEntry.maxGenerations })}>
+                  {t("已從現有帕魯推導出 {n} 個可達物種。可增加代數、擴大玩家範圍或減少目標詞條。", { n: activeEntry.solution.reachableSpecies })}
+                </EmptyState>
+              ) : (
+                activeEntry.solution.routes.map((route, index) => (
+                  <BreedingRoutePanel
+                    key={`${activeEntry.id}-${index}`}
+                    route={route}
+                    index={index}
+                    data={gameData}
+                    desired={activeEntry.desired}
+                    defaultOpen={index === 0}
+                    onShowOnMap={onShowOnMap}
+                  />
+                ))
+              )}
+            </>
+          )}
+
+          {activeEntry && activeEntry.solution.routes.length > 0 && (
+            <p className="text-center text-xs text-ink-muted">{t("路線圖顯示詞條的可能繼承路徑;實際遺傳有機率成分,通常需要重複配種幾次才能讓子代集齊全部目標詞條。")}</p>
+          )}
         </div>
       </div>
-
-      {solution && !solution.target && (
-        <EmptyState icon={<GiEggClutch />} title={t("在 {n} 代內找不到路徑", { n: maxGenerations })}>
-          {t("已從現有帕魯推導出 {n} 個可達物種。可增加代數、擴大玩家範圍或減少目標詞條。", { n: solution.reachableSpecies })}
-        </EmptyState>
-      )}
-
-      {solution?.target && solution.requiredCaptures.length > 0 && (
-        <div className="rounded-md border-2 border-sun/50 bg-sun/10 p-4">
-          <p className="inline-flex items-center gap-2 text-sm font-extrabold text-ink">
-            <FiCrosshair className="size-4 text-sun" />
-            {t("現有帕魯不足，補充捕捉 {n} 隻帕魯後可配種", { n: solution.requiredCaptures.length })}
-          </p>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {solution.requiredCaptures.map((node) => (
-              <span key={`${node.species}-${node.gender}`} className="inline-flex items-center gap-1.5 rounded-md border border-sun/60 bg-card px-2 py-1 text-xs font-bold text-ink">
-                {palName(gameData, node.species)}
-                <span className="text-ink-muted">{node.gender === "m" ? "♂" : "♀"}</span>
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {solution?.target && solution.target.generation > 0 && (
-        <>
-          <BreedingTree target={solution.target} data={gameData} desired={passives} captureCount={solution.requiredCaptures.length} onShowOnMap={onShowOnMap} />
-          <p className="text-center text-xs text-ink-muted">
-            {t("路線圖顯示詞條的可能繼承路徑;實際遺傳有機率成分,通常需要重複配種幾次才能讓子代集齊全部目標詞條。")}
-          </p>
-        </>
-      )}
 
       <p className="text-center text-[11px] text-ink-muted">
         {t("配方資料來自 Pal Calc {version}(MIT)", { version: breedingData?.version ?? "" })} ·{" "}
