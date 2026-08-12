@@ -94,14 +94,40 @@ export async function fetchLatest(force = false): Promise<LatestInfo | null> {
   }
 }
 
-/** depotId → manifest id, as installed on disk. */
+/**
+ * depotId → manifest id, as installed on disk.
+ *
+ * DepotDownloader never deletes a depot's old `<depotId>_<manifestId>.manifest`
+ * file when it patches to a new one — it just adds another one alongside it,
+ * so a depot that's been updated a few times ends up with several manifest
+ * files. `fs.readdirSync` order is not guaranteed to be chronological (in
+ * practice it comes back roughly alphabetical), so naively taking "whichever
+ * one we saw last per depotId" can and does land on a stale manifest — e.g.
+ * an old id starting with "9" sorts after a current one starting with "4",
+ * even though the "4" one is what's actually installed. That made
+ * `updateAvailable` report true forever, even right after a successful
+ * update. Picking the file with the newest mtime instead reflects what
+ * DepotDownloader most recently wrote, which is what's actually installed.
+ */
 export function installedManifests(root: string): Record<string, string> {
   const dir = path.join(root, ".DepotDownloader");
   const result: Record<string, string> = {};
+  const mtimes: Record<string, number> = {};
   try {
     for (const name of fs.readdirSync(dir)) {
       const match = /^(\d+)_(\d+)\.manifest$/.exec(name);
-      if (match) result[match[1]] = match[2];
+      if (!match) continue;
+      const [, depotId, manifestId] = match;
+      let mtimeMs: number;
+      try {
+        mtimeMs = fs.statSync(path.join(dir, name)).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (!(depotId in result) || mtimeMs > mtimes[depotId]) {
+        result[depotId] = manifestId;
+        mtimes[depotId] = mtimeMs;
+      }
     }
   } catch {
     /* not an agent-managed install (e.g. adopted from Steam) */
