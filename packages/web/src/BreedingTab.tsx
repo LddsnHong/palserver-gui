@@ -412,6 +412,9 @@ export function BreedingTab({ client, instanceId, onShowOnMap }: { client: Agent
     cancelCalculation.current = null;
     setCalculating(false);
     setActiveHistoryId(null);
+    // The draft that produced the last error is gone — keeping the red banner
+    // above a freshly picked history entry reads as "this result failed".
+    setError(null);
   }, []);
 
   useEffect(() => {
