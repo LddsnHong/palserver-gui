@@ -250,6 +250,40 @@ function createInstanceFeed<T>(
   };
 }
 
+export async function startThroughUpdateGate<T>(
+  supervisor: Pick<RestartSupervisor, "applyUpdateBeforeStart">,
+  rec: InstanceRecord,
+  ctx: DriverContext,
+  start: (rec: InstanceRecord) => Promise<T>,
+): Promise<T | null> {
+  const canStart = await supervisor.applyUpdateBeforeStart(rec, ctx, {
+    markRunning: true,
+    respectManualStop: true,
+  });
+  return canStart ? start(rec) : null;
+}
+
+export async function startWithPalDefenderRepair(
+  initial: InstanceRecord,
+  operations: {
+    start: (rec: InstanceRecord) => Promise<boolean>;
+    repair: (rec: InstanceRecord) => Promise<InstanceRecord>;
+    stop: (rec: InstanceRecord) => Promise<void>;
+    onStarted: (rec: InstanceRecord) => Promise<void>;
+  },
+): Promise<{ rec: InstanceRecord; started: boolean }> {
+  const started = await operations.start(initial);
+  const repaired = await operations.repair(initial);
+  if (repaired === initial) {
+    if (started) await operations.onStarted(initial);
+    return { rec: initial, started };
+  }
+  await operations.stop(repaired);
+  const repairedStarted = await operations.start(repaired);
+  if (repairedStarted) await operations.onStarted(repaired);
+  return { rec: repaired, started: repairedStarted };
+}
+
 export function registerRoutes(
   app: FastifyInstance,
   store: InstanceStore,
@@ -936,13 +970,19 @@ export function registerRoutes(
     });
   };
 
+  supervisor.setUpdateRestartPreparation(async (initial) => {
+    presence.markAllOffline(initial.id);
+    const reconciled = await reconcileWorldIni(initial);
+    return ensurePalDefenderRcon(reconciled);
+  });
+
   const startWithPalDefenderDefaults = async (initial: InstanceRecord): Promise<{ rec: InstanceRecord; started: boolean }> => {
-    const started = await driverOf(initial).start(initial, ctxOf(initial));
-    const repaired = await ensurePalDefenderRcon(initial);
-    if (repaired === initial) return { rec: initial, started };
-    await driverOf(repaired).stop(repaired, ctxOf(repaired));
-    await driverOf(repaired).start(repaired, ctxOf(repaired));
-    return { rec: repaired, started: true };
+    return startWithPalDefenderRepair(initial, {
+      start: (rec) => driverOf(rec).start(rec, ctxOf(rec)),
+      repair: ensurePalDefenderRcon,
+      stop: (rec) => driverOf(rec).stop(rec, ctxOf(rec)),
+      onStarted: (rec) => supervisor.noteRuntimeStarted(rec, ctxOf(rec)),
+    });
   };
 
   /** 面板主動同步:把 ini 的外部改動併回 store 並回傳(編輯原始檔存檔後、開啟世界設定時呼叫)。 */
@@ -1071,12 +1111,14 @@ export function registerRoutes(
   });
 
   app.post("/api/instances/:id/start", async (req) => {
-    const result = await startWithPalDefenderDefaults(
-      await reconcileWorldIni(getOr404((req.params as { id: string }).id)),
-    );
+    const initial = await reconcileWorldIni(getOr404((req.params as { id: string }).id));
+    const result = await startThroughUpdateGate(supervisor, initial, ctxOf(initial), startWithPalDefenderDefaults);
+    if (!result) return toSummary(getOr404(initial.id));
     if (result.started) {
       supervisor.noteManualState(result.rec.id, true);
       track("server_started");
+    } else {
+      supervisor.noteManualState(result.rec.id, false);
     }
     return toSummary(result.rec);
   });
@@ -1145,15 +1187,13 @@ export function registerRoutes(
     }
     const { cancelled } = await announceBeforeDowntime(rec, req.body);
     if (cancelled) return toSummary(rec); // 倒數期間被取消:不重啟,伺服器繼續跑
-    await driverOf(rec).stop(rec, ctxOf(rec));
-    presence.markAllOffline(rec.id);
-    rec = await reconcileWorldIni(rec);
-    const result = await startWithPalDefenderDefaults(rec);
-    if (result.started) {
-      supervisor.noteManualState(result.rec.id, true);
+    await supervisor.restartForManual(rec, "手動重啟", { announceSeconds: 0 });
+    const current = getOr404(rec.id);
+    if ((await driverOf(current).status(current, ctxOf(current))).status === "running") {
+      supervisor.noteManualState(current.id, true);
       track("server_started");
     }
-    return toSummary(result.rec);
+    return toSummary(current);
   });
 
   app.delete("/api/instances/:id", async (req, reply) => {
@@ -2175,7 +2215,7 @@ export function registerRoutes(
 
   app.get("/api/instances/:id/version", async (req) => {
     const rec = getOr404((req.params as { id: string }).id);
-    return getVersionStatus(rec, ctxOf(rec));
+    return getVersionStatus(rec, ctxOf(rec), supervisor.readPolicy(rec.id).autoUpdate);
   });
 
   app.post("/api/instances/:id/update", async (req, reply) => {
@@ -2184,11 +2224,11 @@ export function registerRoutes(
     const { fresh } = z.object({ fresh: z.boolean().optional() }).parse(req.body ?? {});
 
     if (rec.backend === "native") {
-      if ((await driverOf(rec).status(rec, ctxOf(rec))).status === "running") {
-        return reply.code(409).send({ error: "請先停止伺服器再更新" });
-      }
       if (isInstalling(rec.id)) {
         return reply.code(409).send({ error: "更新已在進行中" });
+      }
+      if (fresh && (await driverOf(rec).status(rec, ctxOf(rec))).status === "running") {
+        return reply.code(409).send({ error: "重灌伺服器前請先停止伺服器" });
       }
       if (fresh) {
         // adopt(使用者自帶目錄)不做刪除式重灌:目錄裡可能有使用者自己的檔案
@@ -2208,18 +2248,23 @@ export function registerRoutes(
         }
       }
       await snapshotBefore(rec, "server update");
-      updateServer(rec, ctxOf(rec), fresh);
+      void supervisor.restartForUpdate(rec, "手動更新伺服器", async () => {
+        await updateServer(rec, ctxOf(rec), fresh);
+      });
       reply.code(202);
       return { started: true, hint: "更新進度會顯示在日誌分頁(agent 來源)" };
     }
 
     if (rec.backend === "docker") {
-      try {
-        const image = await dockerOps.updateImage(rec, store.instanceDir(rec.id));
-        return { started: true, image, hint: "已拉取最新映像檔並重建容器" };
-      } catch (err) {
-        return reply.code(409).send({ error: `映像檔更新失敗：${err instanceof Error ? err.message : String(err)}` });
-      }
+      void supervisor.restartForUpdate(rec, "手動更新 Docker 映像檔", async () => {
+        try {
+          await dockerOps.pullLatestImage(rec);
+        } catch (err) {
+          app.log.error({ err }, "Docker 映像檔更新失敗,將以既有映像檔啟動");
+        }
+      });
+      reply.code(202);
+      return { started: true, hint: "已排入安全重啟並拉取最新映像檔" };
     }
 
     if (rec.backend === "k8s") {
@@ -2229,12 +2274,15 @@ export function registerRoutes(
         });
       }
       const { rolloutRestart } = await import("./k8s.js");
-      try {
-        await rolloutRestart(rec);
-        return { started: true, hint: "已觸發滾動重啟,Pod 會重建並拉取最新映像檔" };
-      } catch (err) {
-        return reply.code(409).send({ error: `滾動重啟失敗：${err instanceof Error ? err.message : String(err)}` });
-      }
+      void supervisor.restartForUpdate(rec, "手動更新 k8s 映像檔", async () => {
+        try {
+          await rolloutRestart(rec);
+        } catch (err) {
+          app.log.error({ err }, "k8s 滾動更新失敗,將以既有 StatefulSet 啟動");
+        }
+      });
+      reply.code(202);
+      return { started: true, hint: "已排入安全重啟,Pod 會拉取最新映像檔" };
     }
 
     return reply.code(409).send({ error: "不支援的後端" });
@@ -2261,8 +2309,10 @@ export function registerRoutes(
   app.put("/api/instances/:id/restart-policy", async (req, reply) => {
     const rec = getOr404((req.params as { id: string }).id);
     const HHMM = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "時間格式須為 HH:MM");
-    const policy = z
+    const prev = supervisor.readPolicy(rec.id);
+    const policyInput = z
       .object({
+        autoUpdate: z.boolean().optional(),
         scheduled: z.object({
           enabled: z.boolean(),
           mode: z.enum(["interval", "daily"]),
@@ -2289,9 +2339,9 @@ export function registerRoutes(
           .optional(),
       })
       .parse(req.body);
+    const policy = { ...policyInput, autoUpdate: policyInput.autoUpdate ?? prev.autoUpdate };
     // 「每天固定時間」單一時刻人人可用;「多個時刻」為贊助者功能。只擋
     // 「新啟用多時刻」——閘門上線前就這樣用的既有設定不破壞。
-    const prev = supervisor.readPolicy(rec.id);
     const multi = (p: { scheduled: { enabled: boolean; mode: string; dailyTimes: string[] } }) =>
       p.scheduled.enabled && p.scheduled.mode === "daily" && p.scheduled.dailyTimes.length > 1;
     if (multi(policy) && !multi(prev) && !featureEnabled("daily-restart")) {

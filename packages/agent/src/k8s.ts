@@ -7,8 +7,18 @@ import { buildLaunchArgs } from "@palserver/shared";
 import type { ServerDriver, DriverContext } from "./driver.js";
 import type { InstanceRecord } from "./store.js";
 import { configPlatformDir } from "./platform.js";
-import { execInPod, findPodName, loadKubeConfig, readFileInPod, writeFileInPod } from "./k8s-files.js";
+import {
+  execInPod,
+  findPodName,
+  listStatefulSetPods,
+  loadKubeConfig,
+  ownedPodsForStatefulSet,
+  readFileInPod,
+  selectStatefulSetContainerName,
+  writeFileInPod,
+} from "./k8s-files.js";
 import { mergeEnginePatch } from "./engine-ini-merge.js";
+import { imageDigest, registryImageDigest } from "./image-digest.js";
 
 /**
  * k8s backend driver.
@@ -38,6 +48,268 @@ function strategicMergeMiddleware(contentType = "application/strategic-merge-pat
     },
     post: (ctx: unknown) => of(ctx),
   };
+}
+
+export interface K8sReadyObservation {
+  status: InstanceStatus;
+  failure?: string;
+  snapshot?: K8sRestartBaseline;
+}
+
+export interface K8sRestartBaseline {
+  podUid: string;
+  containerName: string;
+  restartCount: number;
+}
+
+const K8S_START_FAILURE_REASONS = new Set([
+  "ErrImagePull",
+  "ImagePullBackOff",
+  "InvalidImageName",
+  "CreateContainerConfigError",
+]);
+
+function newestPod(pods: k8s.V1Pod[]): k8s.V1Pod | undefined {
+  const timestamp = (value: Date | string | undefined): number =>
+    value instanceof Date ? value.getTime() : Date.parse(value ?? "") || 0;
+  return pods
+    .filter((pod) => !pod.metadata?.deletionTimestamp)
+    .sort((a, b) =>
+      timestamp(b.metadata?.creationTimestamp) - timestamp(a.metadata?.creationTimestamp)
+    )[0];
+}
+
+export function inspectK8sStartObservation(
+  statefulSet: k8s.V1StatefulSet,
+  pods: k8s.V1Pod[],
+  statefulSetName: string,
+  restartBaseline?: K8sRestartBaseline,
+): K8sReadyObservation {
+  const replicas = statefulSet.spec?.replicas ?? 0;
+  if (replicas === 0) {
+    return { status: "exited", failure: "啟動已取消：StatefulSet 已縮放為 0" };
+  }
+
+  const ownedPods = ownedPodsForStatefulSet(
+    pods,
+    statefulSetName,
+    statefulSet.metadata?.uid,
+  );
+  const failure = ownedPods
+    .flatMap((pod) => [
+      ...(pod.status?.initContainerStatuses ?? []),
+      ...(pod.status?.containerStatuses ?? []),
+    ])
+    .map((container) => container.state?.waiting?.reason)
+    .find((reason): reason is string => Boolean(reason && K8S_START_FAILURE_REASONS.has(reason)));
+  if (failure) return { status: "starting", failure };
+
+  const pod = newestPod(ownedPods);
+  const containerName = selectStatefulSetContainerName(statefulSet);
+  const container = pod?.status?.containerStatuses?.find((entry) => entry.name === containerName);
+  const snapshot = pod?.metadata?.uid && containerName && container
+    ? {
+        podUid: pod.metadata.uid,
+        containerName,
+        restartCount: container.restartCount,
+      }
+    : undefined;
+  const podReady = pod?.status?.conditions?.some(
+    (condition) => condition.type === "Ready" && condition.status === "True",
+  ) === true;
+  const containersReady =
+    (pod?.status?.containerStatuses?.length ?? 0) > 0 &&
+    pod?.status?.containerStatuses?.every((entry) => entry.ready) === true;
+  const generation = statefulSet.metadata?.generation ?? 0;
+  const observedGeneration = statefulSet.status?.observedGeneration ?? 0;
+  const revisionChanged = Boolean(
+    statefulSet.status?.currentRevision &&
+      statefulSet.status?.updateRevision &&
+      statefulSet.status.currentRevision !== statefulSet.status.updateRevision,
+  );
+  const statefulSetReady =
+    (statefulSet.status?.readyReplicas ?? 0) >= replicas &&
+    (statefulSet.status?.updatedReplicas ?? 0) >= replicas &&
+    observedGeneration >= generation &&
+    !revisionChanged;
+  const restartObserved =
+    !restartBaseline ||
+    Boolean(
+      snapshot &&
+        (
+          snapshot.podUid !== restartBaseline.podUid ||
+          (
+            snapshot.containerName === restartBaseline.containerName &&
+            snapshot.restartCount > restartBaseline.restartCount
+          )
+        ),
+    );
+
+  return {
+    status: statefulSetReady && podReady && containersReady && restartObserved
+      ? "running"
+      : "starting",
+    snapshot,
+  };
+}
+
+async function observeK8sStart(
+  appsApi: k8s.AppsV1Api,
+  coreApi: k8s.CoreV1Api,
+  namespace: string,
+  statefulSetName: string,
+  restartBaseline?: K8sRestartBaseline,
+): Promise<K8sReadyObservation> {
+  const [statefulSet, pods] = await Promise.all([
+    appsApi.readNamespacedStatefulSet({ name: statefulSetName, namespace }),
+    coreApi.listNamespacedPod({ namespace }),
+  ]);
+  return inspectK8sStartObservation(
+    statefulSet,
+    pods.items,
+    statefulSetName,
+    restartBaseline,
+  );
+}
+
+async function withDeadline<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage = "Kubernetes StatefulSet 尚未 Ready",
+): Promise<T> {
+  if (timeoutMs <= 0) throw new Error(timeoutMessage);
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(timeoutMessage)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function waitForResultOrTick<T>(
+  promise: Promise<T>,
+  tickMs: number,
+): Promise<T | { kind: "tick" }> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<{ kind: "tick" }>((resolve) => {
+        timer = setTimeout(() => resolve({ kind: "tick" }), tickMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export async function waitForK8sReady(
+  observe: () => Promise<K8sReadyObservation>,
+  options: { maxAttempts?: number; pollMs?: number; timeoutMs?: number } = {},
+): Promise<void> {
+  const maxAttempts = Math.max(1, options.maxAttempts ?? 60);
+  const pollMs = Math.max(0, options.pollMs ?? 5000);
+  const timeoutMs = Math.max(1, options.timeoutMs ?? 315_000);
+  const deadline = Date.now() + timeoutMs;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const observation = await withDeadline(observe(), deadline - Date.now());
+    if (observation.failure) {
+      throw new Error(`Kubernetes 啟動失敗：${observation.failure}`);
+    }
+    if (observation.status === "running") return;
+    if (attempt + 1 < maxAttempts && pollMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+  }
+  throw new Error("Kubernetes StatefulSet 尚未 Ready");
+}
+
+export async function retryWineSettingsSync(
+  sync: () => Promise<void>,
+  observe: () => Promise<K8sReadyObservation>,
+  options: { maxAttempts?: number; pollMs?: number; timeoutMs?: number } = {},
+): Promise<void> {
+  const maxAttempts = Math.max(1, options.maxAttempts ?? 30);
+  const pollMs = Math.max(1, options.pollMs ?? 5000);
+  const deadline = Date.now() + Math.max(1, options.timeoutMs ?? 165_000);
+  let lastError: unknown;
+  const timeoutError = () => new Error(
+    "Wine 設定同步逾時：無法寫入 PalWorldSettings.ini",
+    { cause: lastError },
+  );
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const syncResult = sync().then(
+      () => ({ kind: "success" as const }),
+      (error: unknown) => ({ kind: "failure" as const, error }),
+    );
+    while (true) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) throw timeoutError();
+      const outcome = await waitForResultOrTick(
+        syncResult,
+        Math.min(pollMs, remainingMs),
+      );
+      if (outcome.kind === "success") return;
+      const observationRemainingMs = deadline - Date.now();
+      if (observationRemainingMs <= 0) throw timeoutError();
+      let observation: K8sReadyObservation;
+      try {
+        observation = await withDeadline(observe(), observationRemainingMs);
+      } catch (error) {
+        if (Date.now() >= deadline) throw timeoutError();
+        throw error;
+      }
+      if (observation.failure) {
+        throw new Error(`Kubernetes 啟動失敗：${observation.failure}`, {
+          cause: outcome.kind === "failure" ? outcome.error : lastError,
+        });
+      }
+      if (outcome.kind === "failure") {
+        lastError = outcome.error;
+        const retryDelayMs = Math.min(pollMs, deadline - Date.now());
+        if (retryDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+        }
+        break;
+      }
+    }
+  }
+  const detail = lastError instanceof Error ? `：${lastError.message}` : "";
+  throw new Error(`Wine 設定同步失敗：無法寫入 PalWorldSettings.ini${detail}`, {
+    cause: lastError,
+  });
+}
+
+export async function restartK8sContainer(
+  captureBaseline: () => Promise<K8sRestartBaseline>,
+  restart: () => Promise<unknown>,
+): Promise<K8sRestartBaseline> {
+  const baseline = await captureBaseline();
+  await restart();
+  return baseline;
+}
+
+export async function applyOptionalK8sConfigRestart(
+  applyConfig: () => Promise<boolean>,
+  restart: () => Promise<K8sRestartBaseline>,
+): Promise<K8sRestartBaseline | undefined> {
+  try {
+    if (!(await applyConfig())) return undefined;
+  } catch {
+    // Optional config writes remain best-effort.
+    return undefined;
+  }
+  // Once a config write succeeded, its rollout is no longer optional: hiding
+  // this error would let the API accept a Ready Pod still running old config.
+  return restart();
 }
 
 export const k8sDriver: ServerDriver = {
@@ -76,7 +348,7 @@ export const k8sDriver: ServerDriver = {
         return { status: "starting", runtimeId: null };
       }
       // running — surface the backing Pod name as the runtime id
-      const podName = await findPodName(coreApi, namespace, statefulSet);
+      const podName = await findPodName(coreApi, namespace, statefulSet, sts.metadata?.uid);
       return { status: "running", runtimeId: podName };
     } catch {
       // StatefulSet missing / API unreachable — treat as not materialized.
@@ -91,6 +363,22 @@ export const k8sDriver: ServerDriver = {
     const appsApi = kc.makeApiClient(k8s.AppsV1Api);
     const coreApi = kc.makeApiClient(k8s.CoreV1Api);
     let wineRestartRequired = false;
+    let restartBaseline: K8sRestartBaseline | undefined;
+    const observeStart = (baseline?: K8sRestartBaseline) =>
+      withDeadline(
+        observeK8sStart(appsApi, coreApi, namespace, statefulSet, baseline),
+        15_000,
+      );
+    const captureRestartBaseline = async (): Promise<K8sRestartBaseline> => {
+      const observation = await observeStart();
+      if (observation.failure) {
+        throw new Error(`Kubernetes 啟動失敗：${observation.failure}`);
+      }
+      if (!observation.snapshot) {
+        throw new Error("Kubernetes 啟動失敗：找不到可追蹤的 game-server container");
+      }
+      return observation.snapshot;
+    };
 
     // Ensure Service exposes all ports the agent needs (game, query, REST, RCON).
     await ensureServicePorts(rec).catch(() => {});
@@ -120,20 +408,13 @@ export const k8sDriver: ServerDriver = {
       );
       // Wait for Pod to exist, then write ini. On first boot DepotDownloader
       // creates the dir; on subsequent boots it validates (fast). Retry until exec works.
-      let settingsSynced = false;
-      for (let attempt = 0; attempt < 30; attempt++) {
-        try {
+      await retryWineSettingsSync(
+        async () => {
           await makeDirInPod(rec, iniDir);
           await writeFileInPod(rec, iniRelPath, iniContent);
-          settingsSynced = true;
-          break;
-        } catch {
-          await new Promise((r) => setTimeout(r, 5000));
-        }
-      }
-      if (!settingsSynced) {
-        throw new Error("Wine 設定同步失敗：無法寫入 PalWorldSettings.ini");
-      }
+        },
+        () => observeStart(),
+      );
       // Keep the same manual-edit reconciliation contract as native/docker.
       // The file lives in the Pod, while the managed snapshot belongs to the
       // agent instance state.
@@ -155,17 +436,36 @@ export const k8sDriver: ServerDriver = {
       // A first Wine boot also needs one restart after PalWorldSettings.ini is
       // written. Let that restart apply Engine.ini as well instead of killing
       // PID 1 twice; already-running Pods retain the existing Engine.ini flow.
-      await applyEngineIniK8s(rec, !wineRestartRequired).catch(() => {});
+      if (wineRestartRequired) {
+        await applyEngineIniK8s(rec, false).catch(() => {});
+      } else {
+        const engineRestartBaseline = await applyOptionalK8sConfigRestart(
+          async () => {
+            await applyEngineIniK8s(rec, false);
+            return true;
+          },
+          () => restartK8sContainer(
+            captureRestartBaseline,
+            () => rolloutRestart(rec),
+          ),
+        );
+        if (engineRestartBaseline) restartBaseline = engineRestartBaseline;
+      }
     }
     if (wineRestartRequired) {
-      // The Wine image does not ship a standalone `kill` binary; use the
-      // POSIX shell builtin so the first boot can restart after ini sync.
-      await execInPod(rec, ["sh", "-c", "kill 1"]);
+      // PID 1 in the Wine image may accept `kill 1` without actually exiting.
+      // Restart through the StatefulSet controller so a new Pod UID proves
+      // that the synced ini is running before the API reports success.
+      restartBaseline = await restartK8sContainer(
+        captureRestartBaseline,
+        () => rolloutRestart(rec),
+      );
     }
 
     // Auto-configure PalDefender REST if PD is installed but not yet enabled.
     // This runs AFTER Palworld boots (PD generates RESTConfig.json on first boot).
     if (rec.runtime === "wine") {
+      let pdRestartRequired = false;
       try {
         const pd = await import("./paldefender-rest.js");
         // Wait for PD to generate RESTConfig.json (retry for up to 5 min).
@@ -175,30 +475,37 @@ export const k8sDriver: ServerDriver = {
           // 每次啟動都會空轉滿 5 分鐘,連 /start API 都被卡住。
           if (!status.installed) break;
           if (status.configExists) {
-            let pdRestartRequired = false;
             if (!status.enabled) {
               // PD generated defaults (Enabled=false). Override with our config.
               // Port was already assigned during install (in RESTConfig.json by preConfigureRestApi);
               // just enable + provision token. Keep the port PD already chose.
-              await pd.setPdRestEnabled(rec, { instanceDir: "" } as DriverContext, true).catch(() => {});
-              pdRestartRequired = true;
+              const changed = await pd
+                .setPdRestEnabled(rec, { instanceDir: "" } as DriverContext, true)
+                .then(() => true, () => false);
+              if (changed) pdRestartRequired = true;
             }
             if (!status.hasToken) {
-              await pd.provisionPdToken(rec, { instanceDir: "" } as DriverContext, false).catch(() => {});
-              pdRestartRequired = true;
-            }
-            if (pdRestartRequired) {
-              // Restart PID 1 to apply the new config.
-              await execInPod(rec, ["sh", "-c", "kill 1"]).catch(() => {});
+              const changed = await pd
+                .provisionPdToken(rec, { instanceDir: "" } as DriverContext, false)
+                .then(() => true, () => false);
+              if (changed) pdRestartRequired = true;
             }
             break;
           }
           await new Promise((r) => setTimeout(r, 10000));
         }
       } catch { /* PD not installed — skip */ }
+      if (pdRestartRequired) {
+        restartBaseline = await restartK8sContainer(
+          captureRestartBaseline,
+          () => rolloutRestart(rec),
+        );
+      }
       // Re-patch Service now that PD port may have changed during auto-config.
       await ensureServicePorts(rec).catch(() => {});
     }
+
+    await waitForK8sReady(() => observeStart(restartBaseline));
 
     return true;
   },
@@ -531,11 +838,13 @@ async function statefulSetHasRunningPod(
 ): Promise<boolean> {
   const sts = await appsApi.readNamespacedStatefulSet({ name: statefulSet, namespace });
   if ((sts.spec?.replicas ?? 0) < 1) return false;
-  const pods = await coreApi.listNamespacedPod({
+  const pods = await listStatefulSetPods(
+    coreApi,
     namespace,
-    labelSelector: `app=${statefulSet}`,
-  });
-  return pods.items.some((pod) => pod.status?.phase === "Running");
+    statefulSet,
+    sts.metadata?.uid,
+  );
+  return pods.some((pod) => pod.status?.phase === "Running");
 }
 
 const k8sEngineIni = (rec: InstanceRecord): string =>
@@ -551,20 +860,91 @@ export async function applyEngineIniK8s(rec: InstanceRecord, restart = true): Pr
   const existing = await readFileInPod(rec, k8sEngineIni(rec)).catch(() => "");
   const merged = mergeEnginePatch(existing, rec.engineSettings!);
   await writeFileInPod(rec, k8sEngineIni(rec), merged);
-  if (restart) await execInPod(rec, ["sh", "-c", "kill 1"]).catch(() => {});
+  if (restart) await execInPod(rec, ["sh", "-c", "kill 1"]);
+}
+
+export function buildRolloutPatch(
+  restartedAt: string,
+): { spec: { template: { metadata: { annotations: Record<string, string> } } } } {
+  return {
+    spec: {
+      template: {
+        metadata: { annotations: { "kubectl.kubernetes.io/restartedAt": restartedAt } },
+      },
+    },
+  };
 }
 
 /** k8s rolling restart via annotation patch. */
-export async function rolloutRestart(rec: InstanceRecord): Promise<void> {
+export async function rolloutRestart(
+  rec: InstanceRecord,
+  options: {
+    timeoutMs?: number;
+    patch?: (body: ReturnType<typeof buildRolloutPatch>) => Promise<unknown>;
+  } = {},
+): Promise<void> {
+  const patch = buildRolloutPatch(new Date().toISOString());
+  const request = options.patch
+    ? options.patch(patch)
+    : (() => {
+        const kc = loadKubeConfig();
+        const appsApi = kc.makeApiClient(k8s.AppsV1Api);
+        return appsApi.patchNamespacedStatefulSet(
+          { name: rec.k8sStatefulSet!, namespace: rec.k8sNamespace!, body: patch },
+          { middleware: [strategicMergeMiddleware()] } as unknown as k8s.Configuration,
+        );
+      })();
+  await withDeadline(
+    request,
+    Math.max(1, options.timeoutMs ?? 15_000),
+    "Kubernetes StatefulSet rollout request timed out",
+  );
+}
+
+/** Read the image digest running in the Pod and compare it with the registry
+ * digest for the StatefulSet image tag. */
+export function inspectK8sImageVersion(
+  statefulSet: k8s.V1StatefulSet,
+  pod: k8s.V1Pod | null,
+): { image: string | null; current: string | null } {
+  const containerName = selectStatefulSetContainerName(statefulSet);
+  const container = statefulSet.spec?.template?.spec?.containers?.find(
+    (entry) => entry.name === containerName,
+  );
+  const image = container?.image ?? null;
+  if (!image) return { image: null, current: null };
+  const status = pod?.status?.containerStatuses?.find(
+    (entry) => entry.name === containerName,
+  );
+  return {
+    image,
+    current: imageDigest(status?.imageID) ?? imageDigest(image),
+  };
+}
+
+export async function imageVersionDigests(rec: InstanceRecord): Promise<{
+  current: string | null;
+  latest: string | null;
+}> {
   const kc = loadKubeConfig();
   const appsApi = kc.makeApiClient(k8s.AppsV1Api);
-  const patch = {
-    spec: { template: { metadata: { annotations: { "kubectl.kubernetes.io/restartedAt": new Date().toISOString() } } } },
-  };
-  await appsApi.patchNamespacedStatefulSet(
-    { name: rec.k8sStatefulSet!, namespace: rec.k8sNamespace!, body: patch },
-    { middleware: [strategicMergeMiddleware()] } as unknown as k8s.Configuration,
-  );
+  const coreApi = kc.makeApiClient(k8s.CoreV1Api);
+  const sts = await appsApi.readNamespacedStatefulSet({ name: rec.k8sStatefulSet!, namespace: rec.k8sNamespace! });
+  const podName = await findPodName(
+    coreApi,
+    rec.k8sNamespace!,
+    rec.k8sStatefulSet!,
+    sts.metadata?.uid,
+  ).catch(() => null);
+  const pod = podName
+    ? await coreApi.readNamespacedPod({
+        name: podName,
+        namespace: rec.k8sNamespace!,
+      }).catch(() => null)
+    : null;
+  const { image, current } = inspectK8sImageVersion(sts, pod);
+  if (!image) return { current: null, latest: null };
+  return { current, latest: await registryImageDigest(image) };
 }
 
 /**

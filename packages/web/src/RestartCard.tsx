@@ -13,6 +13,7 @@ const REASON_LABELS: Record<string, string> = {
   memory: "記憶體",
   crash: "崩潰",
   manual: "手動",
+  update: "更新",
   "startup-failure": "啟動失敗",
 };
 
@@ -141,6 +142,17 @@ export function RestartCard({ client, instanceId }: { client: AgentClient; insta
       {notice && (
         <p className="rounded-xl bg-grass/10 px-3 py-2 text-[13px] font-bold text-grass">{notice}</p>
       )}
+
+      <Section
+        icon={<FiRefreshCw className="size-4" />}
+        title={t("偵測到新版本後自動更新")}
+        enabled={draft.autoUpdate}
+        onToggle={(enabled) => patch({ autoUpdate: enabled })}
+      >
+        <p className="text-xs text-ink-muted">
+          {t("偵測到伺服器新版時,會先安全存檔、停止並下載新版,再自動啟動。")}
+        </p>
+      </Section>
 
       {/* 定時重啟 */}
       <Section

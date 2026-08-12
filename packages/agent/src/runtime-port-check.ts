@@ -1,7 +1,7 @@
 import * as k8s from "@kubernetes/client-node";
 import { INSTANCE_LABEL } from "./env.js";
 import { docker } from "./docker.js";
-import { findPodName, loadKubeConfig } from "./k8s-files.js";
+import { findPodName, loadKubeConfig, ownedPodsForStatefulSet } from "./k8s-files.js";
 import { tcpPortFree, udpPortFree, type PortCheckEntry } from "./port-check.js";
 import type { InstanceRecord } from "./store.js";
 
@@ -85,7 +85,12 @@ async function k8sHostPortInUse(rec: InstanceRecord, port: number, protocol: "ud
     // hostNetwork binds on a node, not in the ClusterIP namespace. When the
     // target is stopped there may be no node assignment, so conservatively
     // inspect all running hostNetwork Pods for a listener declaration.
-    const targetPodName = await findPodName(coreApi, rec.k8sNamespace, rec.k8sStatefulSet).catch(() => null);
+    const targetPodName = await findPodName(
+      coreApi,
+      rec.k8sNamespace,
+      rec.k8sStatefulSet,
+      statefulSet.metadata?.uid,
+    ).catch(() => null);
     const targetPod = targetPodName
       ? await coreApi.readNamespacedPod({ name: targetPodName, namespace: rec.k8sNamespace }).catch(() => null)
       : null;
@@ -97,7 +102,11 @@ async function k8sHostPortInUse(rec: InstanceRecord, port: number, protocol: "ud
       if (pod.status?.phase !== "Running" || pod.metadata?.deletionTimestamp) return false;
       if (
         pod.metadata?.namespace === rec.k8sNamespace &&
-        pod.metadata?.labels?.app === rec.k8sStatefulSet
+        ownedPodsForStatefulSet(
+          [pod],
+          rec.k8sStatefulSet!,
+          statefulSet.metadata?.uid,
+        ).length > 0
       ) {
         return false;
       }

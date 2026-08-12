@@ -4,9 +4,16 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { DEFAULT_RESTART_POLICY } from "@palserver/shared";
-import { RestartSupervisor, dailyFireKey } from "./supervisor.js";
+import { DEFAULT_RESTART_POLICY, type RestartPolicy } from "@palserver/shared";
+import {
+  RestartSupervisor,
+  dailyFireKey,
+  type ImageVersionRefresher,
+  type UpdateAvailabilityReader,
+  type UpdateRestartAction,
+} from "./supervisor.js";
 import { newestPalDefenderLogLines } from "./native.js";
+import { compareImageDigests } from "./version.js";
 import type { ServerDriver } from "./driver.js";
 import type { InstanceRecord, InstanceStore } from "./store.js";
 
@@ -20,8 +27,11 @@ test("scheduled restart waits for the old process to exit before starting", { ti
 
   // 假的遊戲 REST API:save/announce/shutdown 一律 200;收到 shutdown 時
   // 模擬「舊程序 8 秒後才真正退出」(8s > 舊碼盲睡的 5s,< 新碼 60s poll 上限)。
+  const order: string[] = [];
   let exitAt: number | null = null;
   const server = http.createServer((req, res) => {
+    if (req.url?.endsWith("/save")) order.push("save");
+    if (req.url?.endsWith("/shutdown")) order.push("shutdown");
     if (req.url?.endsWith("/shutdown")) exitAt = Date.now() + 8_000;
     res.writeHead(200, { "content-type": "application/json" }).end("{}");
   });
@@ -44,6 +54,7 @@ test("scheduled restart waits for the old process to exit before starting", { ti
       runtimeId: null,
     }),
     start: async () => {
+      order.push("start");
       if (spawnedAt === null && oldAlive()) {
         noopStarts++; // 比照 native driver:看到活程序就 no-op
         return false;
@@ -62,28 +73,31 @@ test("scheduled restart waits for the old process to exit before starting", { ti
   };
 
   const store = { list: () => [rec], instanceDir: () => tmp } as unknown as InstanceStore;
+  const prepared: string[] = [];
   const supervisor = new RestartSupervisor(store, () => driver);
+  supervisor.setUpdateRestartPreparation(async (value) => {
+    prepared.push(value.id);
+    return value;
+  });
   const policy = { ...DEFAULT_RESTART_POLICY, announceSeconds: 0 };
   const state = { wasRunning: true, memoryStreak: 0, recentRestarts: [], events: [] };
+  supervisor.writePolicy(rec.id, policy);
 
   const t0 = Date.now();
-  await supervisor.restart(
-    rec,
-    { instanceDir: tmp },
-    driver,
-    policy,
-    state as Parameters<RestartSupervisor["restart"]>[4],
-    "scheduled",
-    "測試重啟",
-  );
+  await supervisor.restartForUpdate(rec, "測試更新", async () => {
+    order.push("update");
+  });
   server.close();
 
   assert.equal(noopStarts, 0, "start() 不得在舊程序還活著時被呼叫(修復前此值為 1)");
   assert.ok(spawnedAt !== null, "新程序必須真的被 spawn");
   assert.ok(exitAt !== null && spawnedAt >= exitAt, "spawn 必須發生在舊程序退出之後");
   assert.equal(forceStops, 0, "8 秒內自行退出,不應觸發強制停止");
+  assert.deepEqual(prepared, [rec.id], "更新重啟啟動前必須執行更新專用 side-effect");
+  assert.deepEqual(order, ["save", "shutdown", "update", "start"], "更新必須在安全停止後才下載並啟動");
   const last = readEvents(tmp).at(-1);
   assert.ok(last?.ok, "重啟事件必須記錄為成功");
+  assert.equal(last?.reason, "update", "重啟事件必須標記為 update");
   // 全程約 5s(存檔等待) + 8s(等舊程序退出),遠短於 poll 上限
   assert.ok(Date.now() - t0 < 45_000);
   fs.rmSync(tmp, { recursive: true, force: true });
@@ -99,10 +113,10 @@ function seedState(dir: string): void {
 }
 
 /** 事件寫在 instanceDir 的 restart-state.json(restart() 以 fresh read 寫回)。 */
-function readEvents(dir: string): { ok: boolean; detail: string }[] {
+function readEvents(dir: string): { ok: boolean; detail: string; reason?: string }[] {
   try {
     const raw = JSON.parse(fs.readFileSync(path.join(dir, "restart-state.json"), "utf8")) as {
-      events?: { ok: boolean; detail: string }[];
+      events?: { ok: boolean; detail: string; reason?: string }[];
     };
     return raw.events ?? [];
   } catch {
@@ -111,7 +125,12 @@ function readEvents(dir: string): { ok: boolean; detail: string }[] {
 }
 
 /** 共用腳手架:假 REST + 假 driver,收到 /shutdown 時呼叫 onShutdown。 */
-async function rig(opts: { onShutdown: (api: RigApi) => void }) {
+async function rig(opts: {
+  onShutdown: (api: RigApi) => void;
+  onUpdate?: UpdateRestartAction;
+  updateAvailable?: boolean;
+  onImageRefresh?: ImageVersionRefresher;
+}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "palsup-"));
   seedState(tmp);
   let exitAt: number | null = null;
@@ -151,10 +170,180 @@ async function rig(opts: { onShutdown: (api: RigApi) => void }) {
     logSources: () => [],
   };
   const store = { list: () => [rec], instanceDir: () => tmp } as unknown as InstanceStore;
-  const supervisor = new RestartSupervisor(store, () => driver);
+  const readUpdateSummary: UpdateAvailabilityReader | undefined = opts.updateAvailable === undefined
+    ? undefined
+    : () => ({ gameVersion: null, updateAvailable: opts.updateAvailable! });
+  const supervisor = new RestartSupervisor(
+    store,
+    () => driver,
+    opts.onUpdate,
+    readUpdateSummary,
+    opts.onImageRefresh,
+  );
   return { tmp, rec, driver, supervisor, server, spawns: () => spawns };
 }
 interface RigApi { tmp: string; killOld: () => void; takeover: () => void; spawns: () => number }
+
+test("post-start image refresh is best-effort", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "palrefresh-"));
+  const rec = { id: "refresh-safe", backend: "k8s", settings: {} } as unknown as InstanceRecord;
+  const store = { list: () => [rec], instanceDir: () => tmp } as unknown as InstanceStore;
+  const supervisor = new RestartSupervisor(
+    store,
+    () => ({} as ServerDriver),
+    undefined,
+    undefined,
+    async () => {
+      throw new Error("version cache disk failure");
+    },
+  );
+
+  await assert.doesNotReject(
+    supervisor.noteRuntimeStarted(rec, { instanceDir: tmp }),
+  );
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("restart downloads a detected native update before starting", { timeout: 60_000 }, async () => {
+  let updateCalls = 0;
+  let imageRefreshes = 0;
+  const rigged = await rig({
+    onShutdown: (api) => api.killOld(),
+    updateAvailable: true,
+    onUpdate: async (_rec, _ctx) => {
+      updateCalls++;
+      assert.equal(rigged.spawns(), 0, "新版下載完成前不得啟動伺服器");
+    },
+    onImageRefresh: async (_rec, _ctx, options) => {
+      imageRefreshes++;
+      assert.ok(options);
+      assert.equal(options.runtimeRunning, true);
+      assert.equal(options.force, true);
+    },
+  });
+  const { tmp, rec, driver, supervisor, server, spawns } = rigged;
+  await supervisor.restart(rec, { instanceDir: tmp }, driver, { ...DEFAULT_RESTART_POLICY, announceSeconds: 0 },
+    { wasRunning: true, memoryStreak: 0, recentRestarts: [], events: [] } as Parameters<RestartSupervisor["restart"]>[4],
+    "scheduled", "測試排程");
+  server.close();
+  assert.equal(updateCalls, 1, "偵測到新版時重啟前必須下載一次");
+  assert.equal(spawns(), 1, "下載完成後才啟動伺服器");
+  assert.equal(imageRefreshes, 1, "成功啟動後必須強制刷新 image digest");
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("update gate applies to every backend before a start", async () => {
+  const backends = ["native", "docker", "k8s"] as const;
+  for (const backend of backends) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "palgate-"));
+    const rec = { id: `gate-${backend}`, backend, settings: {} } as unknown as InstanceRecord;
+    const store = { list: () => [rec], instanceDir: () => tmp } as unknown as InstanceStore;
+    let updates = 0;
+    const supervisor = new RestartSupervisor(
+      store,
+      () => ({} as ServerDriver),
+      async () => { updates++; },
+      () => ({ gameVersion: null, updateAvailable: true }),
+    );
+
+    await supervisor.applyUpdateBeforeStart(rec, { instanceDir: tmp });
+    assert.equal(updates, 1, `${backend} 必須在啟動前套用偵測到的更新`);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("manual restart uses the supervisor update gate", { timeout: 60_000 }, async () => {
+  let updateCalls = 0;
+  const rigged = await rig({
+    onShutdown: (api) => api.killOld(),
+    updateAvailable: true,
+    onUpdate: async () => { updateCalls++; },
+  });
+  const { tmp, rec, supervisor, server, spawns } = rigged;
+  await supervisor.restartForManual(rec, "測試手動重啟", { announceSeconds: 0 });
+  server.close();
+  assert.equal(updateCalls, 1, "手動重啟必須在 start 前套用更新");
+  assert.equal(spawns(), 1, "手動重啟必須仍走 supervisor 安全啟動");
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("start gate cancels after a manual stop during update", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "palstart-stop-"));
+  const rec = { id: "start-stop", backend: "native", settings: {} } as unknown as InstanceRecord;
+  const store = { list: () => [rec], instanceDir: () => tmp } as unknown as InstanceStore;
+  const supervisor = new RestartSupervisor(
+    store,
+    () => ({} as ServerDriver),
+    async () => {
+      fs.writeFileSync(
+        path.join(tmp, "restart-state.json"),
+        JSON.stringify({ wasRunning: false, memoryStreak: 0, recentRestarts: [], events: [] }),
+      );
+    },
+    () => ({ gameVersion: null, updateAvailable: true }),
+  );
+
+  const canStart = await supervisor.applyUpdateBeforeStart(
+    rec,
+    { instanceDir: tmp },
+    { markRunning: true, respectManualStop: true },
+  );
+  assert.equal(canStart, false, "更新期間的手動停止必須取消後續 start");
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("update restart skips start after a manual stop during update", { timeout: 60_000 }, async () => {
+  const rigged = await rig({
+    onShutdown: (api) => api.killOld(),
+    updateAvailable: true,
+    onUpdate: async () => {
+      const raw = JSON.parse(fs.readFileSync(path.join(rigged.tmp, "restart-state.json"), "utf8"));
+      fs.writeFileSync(path.join(rigged.tmp, "restart-state.json"), JSON.stringify({ ...raw, wasRunning: false }));
+    },
+  });
+  const { tmp, rec, supervisor, server, spawns } = rigged;
+  await supervisor.restartForUpdate(rec, "測試停止中的更新");
+  server.close();
+  assert.equal(spawns(), 0, "更新期間手動停止後不得 start");
+  assert.match(readEvents(tmp).at(-1)?.detail ?? "", /更新準備期間/);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("auto update fires once on false-to-true and is throttled afterwards", { timeout: 60_000 }, async () => {
+  let updateCalls = 0;
+  const options = {
+    onShutdown: (api: RigApi) => api.killOld(),
+    updateAvailable: false,
+    onUpdate: async () => { updateCalls++; },
+  };
+  const rigged = await rig(options);
+  const { tmp, rec, supervisor, server } = rigged;
+  const policy = { ...DEFAULT_RESTART_POLICY, autoUpdate: true, announceSeconds: 0 };
+  supervisor.writePolicy(rec.id, policy);
+  const emit = (supervisor as unknown as {
+    emitUpdateTransition: (
+      rec: InstanceRecord,
+      ctx: { instanceDir: string },
+      policy: RestartPolicy,
+      status: "running",
+    ) => Promise<void>;
+  }).emitUpdateTransition.bind(supervisor);
+
+  await emit(rec, { instanceDir: tmp }, policy, "running"); // establish false baseline
+  options.updateAvailable = true;
+  await emit(rec, { instanceDir: tmp }, policy, "running"); // trigger once
+  await emit(rec, { instanceDir: tmp }, policy, "running"); // true -> true: no second restart
+
+  server.close();
+  assert.equal(updateCalls, 1, "新版只應觸發一次自動更新");
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("image digest comparison returns update, current, or unknown", () => {
+  assert.equal(compareImageDigests("sha256:old", "sha256:new"), true);
+  assert.equal(compareImageDigests("sha256:same", "sha256:same"), false);
+  assert.equal(compareImageDigests(null, "sha256:new"), null);
+});
 
 /** 等待期間伺服器被手動重啟接手(runtimeId 變了)→ 取消排程重啟,不碰新程序。 */
 test("scheduled restart hands over when a manual restart takes over mid-wait", { timeout: 60_000 }, async () => {

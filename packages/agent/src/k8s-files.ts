@@ -60,17 +60,50 @@ export function loadKubeConfig(): k8s.KubeConfig {
   return kc;
 }
 
+/** Keep Pod discovery tied to Kubernetes ownership, not a deployment-specific label convention. */
+export function ownedPodsForStatefulSet(
+  pods: k8s.V1Pod[],
+  statefulSet: string,
+  statefulSetUid?: string,
+): k8s.V1Pod[] {
+  return pods.filter((pod) =>
+    !pod.metadata?.deletionTimestamp &&
+    pod.metadata?.ownerReferences?.some((owner) =>
+      owner.kind === "StatefulSet" &&
+      owner.name === statefulSet &&
+      (!statefulSetUid || owner.uid === statefulSetUid) &&
+      owner.controller !== false
+    ),
+  );
+}
+
+export async function listStatefulSetPods(
+  coreApi: k8s.CoreV1Api,
+  namespace: string,
+  statefulSet: string,
+  statefulSetUid?: string,
+): Promise<k8s.V1Pod[]> {
+  const pods = await coreApi.listNamespacedPod({ namespace });
+  return ownedPodsForStatefulSet(pods.items, statefulSet, statefulSetUid);
+}
+
+/** Select the game container even when a metrics/logging sidecar is listed first. */
+export function selectStatefulSetContainerName(statefulSet: k8s.V1StatefulSet): string {
+  const containers = statefulSet.spec?.template?.spec?.containers ?? [];
+  return containers.find((container) =>
+    container.volumeMounts?.some((mount) => mount.mountPath === POD_ROOT)
+  )?.name ?? containers[0]?.name ?? "";
+}
+
 /** Find the newest non-terminating Running Pod backing a StatefulSet. */
 export async function findPodName(
   coreApi: k8s.CoreV1Api,
   namespace: string,
   statefulSet: string,
+  statefulSetUid?: string,
 ): Promise<string | null> {
-  const pods = await coreApi.listNamespacedPod({
-    namespace,
-    labelSelector: `app=${statefulSet}`,
-  });
-  const running = pods.items
+  const pods = await listStatefulSetPods(coreApi, namespace, statefulSet, statefulSetUid);
+  const running = pods
     .filter((pod) => pod.status?.phase === "Running" && !pod.metadata?.deletionTimestamp)
     .sort((a, b) => {
       const timestamp = (value: Date | string | undefined): number =>
@@ -105,15 +138,15 @@ async function podOf(rec: InstanceRecord): Promise<PodTarget> {
   const coreApi = kc.makeApiClient(k8s.CoreV1Api);
   const namespace = rec.k8sNamespace!;
   const statefulSet = rec.k8sStatefulSet!;
-  const podName = await findPodName(coreApi, namespace, statefulSet);
-  if (!podName) throw new Error("找不到運行中的 game-server Pod");
-
   const statefulSetApi = kc.makeApiClient(k8s.AppsV1Api);
   const sts = await statefulSetApi.readNamespacedStatefulSet({
     name: statefulSet,
     namespace,
   });
-  const containerName = sts.spec?.template?.spec?.containers?.[0]?.name ?? "";
+  const podName = await findPodName(coreApi, namespace, statefulSet, sts.metadata?.uid);
+  if (!podName) throw new Error("找不到運行中的 game-server Pod");
+  const containerName = selectStatefulSetContainerName(sts);
+  if (!containerName) throw new Error("StatefulSet 沒有可用的 game-server container");
   return { kc, namespace, podName, containerName };
 }
 

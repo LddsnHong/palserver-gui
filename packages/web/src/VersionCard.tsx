@@ -58,7 +58,7 @@ export function VersionCard({
       ? t(
           "重灌會【刪除】遊戲本體檔案後全新下載(數 GB)。\n\n會保留:世界存檔與設定檔(整個 Pal/Saved,含 PalWorldSettings.ini / Engine.ini),並在開始前自動備份啟用中的世界。\n會刪除:已安裝的模組(UE4SS / PalDefender / pak),重灌後需重新安裝。\n\n確定要重灌嗎?",
         )
-      : t("更新會重新下載伺服器檔案(數 GB),期間伺服器無法啟動。") + modNote + "\n\n" + t("確定要更新嗎?");
+      : t("更新會先安全停止伺服器,重新下載檔案(數 GB),完成後自動啟動。") + modNote + "\n\n" + t("確定要更新嗎?");
     if (!confirm(message)) return;
     setBusy(true);
     setError(null);
@@ -93,11 +93,19 @@ export function VersionCard({
 
       <div className="mt-3">
         {version.updateAvailable === true ? (
-          <div className="rounded-xl border-2 border-sun/40 bg-sun/10 p-3">
-            <p className="text-[13px] font-bold text-sun">
-              {t("有新版本可更新。更新前建議先到「存檔備份」建立一份備份。")}
-            </p>
-          </div>
+          version.autoUpdate ? (
+            <div className="rounded-xl border-2 border-grass/40 bg-grass/10 p-3">
+              <p className="text-[13px] font-bold text-grass">
+                {t("偵測到新版本，自動更新已啟用，將自動安全套用。")}
+              </p>
+            </div>
+          ) : (
+            <div className="rounded-xl border-2 border-sun/40 bg-sun/10 p-3">
+              <p className="text-[13px] font-bold text-sun">
+                {t("有新版本可更新。更新前建議先到「存檔備份」建立一份備份。")}
+              </p>
+            </div>
+          )
         ) : version.updateAvailable === false ? (
           <p className="inline-flex items-center gap-1.5 rounded-full border-[1.5px] border-grass/40 bg-grass/15 px-3 py-1 text-xs font-bold text-grass">
             <FiCheck className="size-3.5" /> {t("已是最新版本")}
@@ -115,14 +123,10 @@ export function VersionCard({
         <button
           className={`${version.updateAvailable === true ? btn : btnGhost} inline-flex items-center gap-1.5`}
           onClick={() => void update()}
-          disabled={busy || running}
-          title={
-            running
-              ? t("請先停止伺服器")
-              : version.updateAvailable === true
-                ? undefined
-                : t("重新執行更新(內含檔案完整性驗證);偵測不到版本落差時也可用")
-          }
+          disabled={busy}
+          title={version.updateAvailable === true
+            ? undefined
+            : t("重新執行更新(內含檔案完整性驗證);偵測不到版本落差時也可用")}
         >
           <FiDownload className="size-4" /> {busy ? t("啟動更新中…") : t("立即更新")}
         </button>

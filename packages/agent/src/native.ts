@@ -645,8 +645,8 @@ function wipeGameFiles(root: string, appendLog: (line: string) => void): void {
  * @param fresh 重灌模式:先刪除遊戲本體(保留 Pal/Saved)再全新下載 —— 給
  *              「更新一直失敗」的使用者;呼叫端負責先備份世界存檔。
  */
-export function updateServer(rec: InstanceRecord, ctx: DriverContext, fresh = false): void {
-  if (installing.has(rec.id)) return;
+export function updateServer(rec: InstanceRecord, ctx: DriverContext, fresh = false): Promise<void> {
+  if (installing.has(rec.id)) return Promise.resolve();
   installing.add(rec.id);
   installProgress.set(rec.id, 0);
   installErrors.delete(rec.id); // 新的一次嘗試,清掉上次的失敗
@@ -660,7 +660,7 @@ export function updateServer(rec: InstanceRecord, ctx: DriverContext, fresh = fa
       if (recent.length > 15) recent.shift();
     }
   };
-  void (async () => {
+  return (async () => {
     try {
       fs.mkdirSync(ctx.instanceDir, { recursive: true });
       appendLog(fresh ? "[palserver] 開始重灌伺服器(刪除本體後重新下載)…" : "[palserver] 開始更新伺服器…");
