@@ -39,6 +39,9 @@ const BOOT_GRACE_MS = 120_000;
  * process to actually exit before force-stopping. Big worlds flush saves on the
  * way out, so this needs headroom beyond the announced waittime. */
 const SHUTDOWN_EXIT_TIMEOUT_MS = 60_000;
+/** k8s only: how long to let the announced shutdown countdown and the server's
+ * own flush run before scaling the StatefulSet to zero. */
+const K8S_SHUTDOWN_GRACE_MS = 45_000;
 
 /** daily 模式的觸發鍵:以「預計實際重啟的時刻」(now + 公告秒數)對表 ——
  * 公告先行,重啟正落在使用者設定的 HH:MM,而不是晚 announceSeconds 才開始。
@@ -121,6 +124,20 @@ export class RestartSupervisor {
     this.updateRestartPreparation = preparation;
   }
 
+  /** Applying an update is best-effort. A download / image-pull / rollout
+   * failure must never turn "bring the server up" into "the server stays
+   * down" — that would hard-lock any host that temporarily can't reach Steam
+   * or the registry, since every later start would fail on the same update.
+   * Record it, start the version already on disk, retry on the next start. */
+  private recordUpdateFallback(id: string, err: unknown): void {
+    this.record(id, this.readState(id), {
+      at: new Date().toISOString(),
+      reason: "update",
+      ok: false,
+      detail: `套用新版失敗,改用現有版本啟動:${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+
   /** Apply a detected update before any caller starts an instance. */
   async applyUpdateBeforeStart(
     rec: InstanceRecord,
@@ -132,14 +149,15 @@ export class RestartSupervisor {
       state.wasRunning = true;
       this.writeState(rec.id, state);
     }
-    try {
-      if (this.updateBeforeStart) {
-        const { updateAvailable } = this.readUpdateSummary(rec, ctx);
-        if (updateAvailable === true) await this.updateBeforeStart(rec, ctx);
+    if (this.updateBeforeStart) {
+      const { updateAvailable } = this.readUpdateSummary(rec, ctx);
+      if (updateAvailable === true) {
+        try {
+          await this.updateBeforeStart(rec, ctx);
+        } catch (err) {
+          this.recordUpdateFallback(rec.id, err);
+        }
       }
-    } catch (err) {
-      if (options.markRunning) this.noteManualState(rec.id, false);
-      throw err;
     }
     return !options.respectManualStop || this.readState(rec.id).wasRunning;
   }
@@ -573,9 +591,21 @@ export class RestartSupervisor {
         await driver.stop(rec, ctx);
       } else {
         // StatefulSet controllers restart a Pod whose PID 1 exits while the
-        // replica count remains 1. Scale k8s to zero after graceful shutdown
-        // so the update preparation cannot be bypassed by a replacement Pod.
-        if (rec.backend === "k8s") await driver.stop(rec, ctx);
+        // replica count remains 1, so k8s has to be scaled to zero for the
+        // update preparation not to be bypassed by a replacement Pod. Don't do
+        // it immediately though: rest.shutdown() only *schedules* the exit
+        // (10s announced countdown, then the server's own flush), and scaling
+        // straight away SIGTERMs the container mid-countdown. Wait until the
+        // container drops out of Ready — that is PID 1 exiting — and only fall
+        // through on the bound so a wedged server can't stall the restart.
+        if (rec.backend === "k8s") {
+          const graceDeadline = Date.now() + K8S_SHUTDOWN_GRACE_MS;
+          while (Date.now() < graceDeadline) {
+            if ((await driver.status(rec, ctx)).status !== "running") break;
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+          await driver.stop(rec, ctx);
+        }
         // Graceful shutdown succeeded — but the server only *begins* exiting
         // after the announced waittime (10s), and flushing a big world can take
         // longer still. Poll until the old process is really gone: starting the
@@ -628,9 +658,15 @@ export class RestartSupervisor {
         return;
       }
 
-      const startRec = prepareBeforeStart ? await prepareBeforeStart(rec) : rec;
-      if (!prepareBeforeStart && reason !== "update") {
-        await this.applyUpdateBeforeStart(rec, ctx);
+      // The server is already stopped by this point, so a failed update must
+      // fall back to starting the version on disk (see recordUpdateFallback).
+      let startRec = rec;
+      try {
+        if (prepareBeforeStart) startRec = await prepareBeforeStart(rec);
+        else if (reason !== "update") await this.applyUpdateBeforeStart(rec, ctx);
+      } catch (err) {
+        startRec = rec;
+        this.recordUpdateFallback(rec.id, err);
       }
       // The update/pull/rollout callback can take minutes. A manual stop during
       // that work must win over the eventual start.

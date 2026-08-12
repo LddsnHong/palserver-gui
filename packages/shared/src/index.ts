@@ -971,7 +971,10 @@ export interface SaveHealthStatus {
 export type RestartReason = "scheduled" | "memory" | "crash" | "manual" | "update" | "startup-failure";
 
 export interface RestartPolicy {
-  /** Download and safely restart when a new server version is detected. */
+  /** Download and safely restart when a new server version is detected.
+   *  Opt-in: an unattended restart disconnects everyone who is online, so it
+   *  stays off until the server owner turns it on (existing instances upgrading
+   *  from a version without this field therefore keep their old behaviour). */
   autoUpdate: boolean;
   /** Restart on a timer: every N minutes, or at fixed times of day. */
   scheduled: {
@@ -1009,7 +1012,7 @@ export interface RestartPolicy {
 }
 
 export const DEFAULT_RESTART_POLICY: RestartPolicy = {
-  autoUpdate: true,
+  autoUpdate: false,
   scheduled: { enabled: false, mode: "interval", intervalMinutes: 360, dailyTimes: ["05:00"] },
   memory: { enabled: false, thresholdMB: 12288, sustainedChecks: 3 },
   crash: { enabled: true, maxPerHour: 5 },

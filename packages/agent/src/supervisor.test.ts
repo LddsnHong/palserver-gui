@@ -431,3 +431,120 @@ test("newestPalDefenderLogLines respects sinceMs", () => {
   assert.deepEqual(newestPalDefenderLogLines(rec, ctx, 1, now + 30_000), []);
   fs.rmSync(tmp, { recursive: true, force: true });
 });
+
+/* ── 更新失敗不得把「把伺服器叫起來」變成「伺服器一直是關的」 ──
+ *  自動更新入口收斂到每個 start/restart 之後,下載/pull/rollout 失敗若往上拋,
+ *  連不到 Steam/registry 的主機會永遠開不了服(每次啟動都卡在同一個更新)。 */
+
+test("a failed update still starts the version already on disk", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "palupdfail-"));
+  const rec = { id: "upd-fail", backend: "native", settings: {} } as unknown as InstanceRecord;
+  const store = { list: () => [rec], instanceDir: () => tmp } as unknown as InstanceStore;
+  const supervisor = new RestartSupervisor(
+    store,
+    () => ({} as ServerDriver),
+    async () => { throw new Error("DepotDownloader 連線失敗"); },
+    () => ({ gameVersion: null, updateAvailable: true }),
+  );
+
+  const canStart = await supervisor.applyUpdateBeforeStart(
+    rec,
+    { instanceDir: tmp },
+    { markRunning: true, respectManualStop: true },
+  );
+  assert.equal(canStart, true, "更新失敗不得阻擋啟動(否則主機離線時永遠開不了服)");
+  const last = readEvents(tmp).at(-1);
+  assert.equal(last?.ok, false, "退回舊版必須留下失敗紀錄");
+  assert.match(last?.detail ?? "", /套用新版失敗/);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("an update restart still brings the server back when the download fails", { timeout: 60_000 }, async () => {
+  const rigged = await rig({ onShutdown: (api) => api.killOld() });
+  const { tmp, rec, supervisor, server, spawns } = rigged;
+  await supervisor.restartForUpdate(rec, "測試更新失敗", async () => {
+    throw new Error("registry 無法連線");
+  });
+  server.close();
+  assert.equal(spawns(), 1, "停機後更新失敗,仍必須用現有版本把伺服器啟動回來");
+  const details = readEvents(tmp).map((e) => e.detail);
+  assert.ok(details.some((d) => /套用新版失敗/.test(d)), "必須留下更新失敗的紀錄");
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+/* ── 自動更新是 opt-in ──
+ *  無人值守的重啟會把線上玩家全部踢掉,既有實例(設定檔沒有這個欄位)升級後
+ *  行為必須完全不變,由服主自己到 GUI 打開。 */
+test("autoUpdate stays off for existing instances upgrading from an older version", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "palpolicy-"));
+  const store = { list: () => [], instanceDir: () => tmp } as unknown as InstanceStore;
+  const supervisor = new RestartSupervisor(store, () => ({} as ServerDriver));
+  assert.equal(DEFAULT_RESTART_POLICY.autoUpdate, false, "預設不得自動更新重啟");
+
+  // 舊版寫下的設定檔沒有 autoUpdate 欄位
+  const legacy: Omit<RestartPolicy, "autoUpdate"> & { autoUpdate?: boolean } = {
+    ...structuredClone(DEFAULT_RESTART_POLICY),
+  };
+  delete legacy.autoUpdate;
+  fs.writeFileSync(path.join(tmp, "restart-policy.json"), JSON.stringify(legacy, null, 2));
+  assert.equal(
+    supervisor.readPolicy("legacy").autoUpdate,
+    false,
+    "既有實例升級後不得被靜默開啟自動更新重啟",
+  );
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+/* ── k8s:縮到 0 之前要讓公告倒數與存檔跑完 ──
+ *  rest.shutdown() 只是「排程」關機(10 秒倒數 + 伺服器自己的 flush)。
+ *  一收到 200 就把 StatefulSet 縮到 0 等於在倒數途中 SIGTERM 容器;
+ *  而 status() 一看到 replicas=0 就回 exited,等待迴圈也就形同虛設。 */
+test("k8s scales the StatefulSet down only after the server itself exits", { timeout: 60_000 }, async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "palk8s-"));
+  seedState(tmp);
+  let gameAlive = true;
+  const order: string[] = [];
+  const server = http.createServer((req, res) => {
+    if (req.url?.endsWith("/shutdown")) {
+      order.push("shutdown");
+      // 倒數 + flush 之後 PID 1 才真的退出 → 容器變成 not-ready
+      setTimeout(() => { gameAlive = false; }, 4_000);
+    }
+    res.writeHead(200, { "content-type": "application/json" }).end("{}");
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as { port: number }).port;
+  const rec = {
+    id: "k8s-grace",
+    backend: "k8s",
+    settings: { RESTAPIEnabled: true, RESTAPIPort: port, AdminPassword: "pw" },
+  } as unknown as InstanceRecord;
+
+  let scaledDown = false;
+  const driver: ServerDriver = {
+    // 縮到 0 之後照 k8sDriver 的語意回 exited
+    status: async () => ({ status: scaledDown ? "exited" : gameAlive ? "running" : "starting", runtimeId: null }),
+    start: async () => { order.push("start"); return true; },
+    stop: async () => {
+      order.push(gameAlive ? "scale-down-while-alive" : "scale-down");
+      scaledDown = true;
+    },
+    remove: async () => {},
+    stats: async () => null,
+    streamLogs: async () => () => {},
+    logSources: () => [],
+  };
+  const store = { list: () => [rec], instanceDir: () => tmp } as unknown as InstanceStore;
+  const supervisor = new RestartSupervisor(store, () => driver);
+  supervisor.writePolicy(rec.id, { ...DEFAULT_RESTART_POLICY, announceSeconds: 0 });
+
+  await supervisor.restartForUpdate(rec, "測試 k8s 安全停止", async () => { order.push("update"); });
+  server.close();
+
+  assert.deepEqual(
+    order,
+    ["shutdown", "scale-down", "update", "start"],
+    "必須等伺服器自己退出才縮到 0(修復前是 scale-down-while-alive)",
+  );
+  fs.rmSync(tmp, { recursive: true, force: true });
+});

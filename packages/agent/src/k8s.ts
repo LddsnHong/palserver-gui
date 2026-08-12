@@ -62,6 +62,10 @@ export interface K8sRestartBaseline {
   restartCount: number;
 }
 
+/** How long stop() waits for the scaled-down Pod to actually disappear. Covers
+ *  a generous terminationGracePeriodSeconds plus kubelet/PVC detach time. */
+const K8S_STOP_TIMEOUT_MS = 180_000;
+
 const K8S_START_FAILURE_REASONS = new Set([
   "ErrImagePull",
   "ImagePullBackOff",
@@ -515,11 +519,33 @@ export const k8sDriver: ServerDriver = {
     const statefulSet = rec.k8sStatefulSet!;
     const kc = loadKubeConfig();
     const appsApi = kc.makeApiClient(k8s.AppsV1Api);
+    const coreApi = kc.makeApiClient(k8s.CoreV1Api);
     const patch = { spec: { replicas: 0 } };
     await appsApi.patchNamespacedStatefulSetScale(
       { name: statefulSet, namespace, body: patch },
       { middleware: [strategicMergeMiddleware()] } as unknown as k8s.Configuration,
     );
+    // Scaling only *asks* the controller to delete the Pod; the container then
+    // gets its terminationGracePeriod to flush and exit. status() reports
+    // "exited" the moment replicas hits 0, so without waiting here a caller
+    // (restart / update rollout) would start the replacement while the old Pod
+    // still holds the PVC. Wait until it is really gone.
+    const deadline = Date.now() + K8S_STOP_TIMEOUT_MS;
+    for (;;) {
+      // Not listStatefulSetPods(): that one hides Pods with a deletionTimestamp,
+      // which is exactly the state we are waiting to leave.
+      const alive = await coreApi
+        .listNamespacedPod({ namespace })
+        .then((list) => list.items.filter((pod) =>
+          pod.metadata?.ownerReferences?.some((owner) =>
+            owner.kind === "StatefulSet" && owner.name === statefulSet && owner.controller !== false
+          ),
+        ))
+        .catch(() => []);
+      if (alive.length === 0) return;
+      if (Date.now() >= deadline) return; // kubelet is stuck; don't block forever
+      await new Promise((r) => setTimeout(r, 1000));
+    }
   },
 
   async remove(rec, ctx): Promise<void> {
